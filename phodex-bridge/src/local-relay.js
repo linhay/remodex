@@ -66,6 +66,7 @@ async function startTryCloudflareRelay({
   cloudflaredBin = "cloudflared",
   readyTimeoutMs = DEFAULT_TUNNEL_READY_TIMEOUT_MS,
   onTunnelExit = null,
+  onStatus = null,
 } = {}) {
   const relayServer = await startLocalRelayServer({ host, port });
 
@@ -74,6 +75,7 @@ async function startTryCloudflareRelay({
       localUrl: relayServer.httpUrl,
       cloudflaredBin,
       readyTimeoutMs,
+      onStatus,
       onUnexpectedExit: onTunnelExit,
     });
 
@@ -114,6 +116,7 @@ async function startTryCloudflareTunnel({
   cloudflaredBin,
   readyTimeoutMs,
   readyPollIntervalMs = DEFAULT_TUNNEL_READY_POLL_INTERVAL_MS,
+  onStatus = null,
   onUnexpectedExit,
   fetchImpl = globalThis.fetch,
   spawnImpl = spawn,
@@ -136,6 +139,7 @@ async function startTryCloudflareTunnel({
   let resolved = false;
   let closed = false;
   let publicReadyPromise = null;
+  let publicUrlDiscoveredAt = "";
   let readyTimeout = null;
 
   const registerLogChunk = (chunk) => {
@@ -183,6 +187,13 @@ async function startTryCloudflareTunnel({
         return;
       }
 
+      publicUrlDiscoveredAt = formatStatusTimestamp();
+      emitStatus(onStatus, {
+        type: "public_url_discovered",
+        publicUrl,
+        at: publicUrlDiscoveredAt,
+      });
+
       clearTimeout(readyTimeout);
       publicReadyPromise = waitForPublicTunnelReady({
         publicUrl,
@@ -196,7 +207,16 @@ async function startTryCloudflareTunnel({
 
         resolved = true;
         clearTimeout(readyTimeout);
-        resolve(createTunnelHandle(publicUrl));
+        const publicReadyAt = formatStatusTimestamp();
+        emitStatus(onStatus, {
+          type: "public_ready",
+          publicUrl,
+          at: publicReadyAt,
+        });
+        resolve(createTunnelHandle(publicUrl, {
+          publicReadyAt,
+          publicUrlDiscoveredAt,
+        }));
       }).catch((error) => {
         if (resolved) {
           return;
@@ -204,7 +224,17 @@ async function startTryCloudflareTunnel({
 
         resolved = true;
         clearTimeout(readyTimeout);
-        resolve(createTunnelHandle(publicUrl, error.message));
+        emitStatus(onStatus, {
+          type: "public_pending",
+          publicUrl,
+          at: formatStatusTimestamp(),
+          warning: error.message,
+        });
+        resolve(createTunnelHandle(publicUrl, {
+          publicUrlDiscoveredAt,
+          readinessWarning: error.message,
+        }));
+        continueWaitingForPublicReady(publicUrl);
       });
     };
 
@@ -242,10 +272,16 @@ async function startTryCloudflareTunnel({
 
   return startup;
 
-  function createTunnelHandle(publicUrl, readinessWarning = "") {
+  function createTunnelHandle(publicUrl, {
+    publicReadyAt = "",
+    publicUrlDiscoveredAt = "",
+    readinessWarning = "",
+  } = {}) {
     const socketBaseUrl = upgradeHttpUrlToWebSocket(publicUrl);
     return {
       publicUrl,
+      publicReadyAt,
+      publicUrlDiscoveredAt,
       readinessWarning,
       socketBaseUrl,
       async close() {
@@ -259,6 +295,28 @@ async function startTryCloudflareTunnel({
         await onceExit(child);
       },
     };
+  }
+
+  function continueWaitingForPublicReady(publicUrl) {
+    waitForPublicTunnelReady({
+      publicUrl,
+      timeoutMs: null,
+      pollIntervalMs: readyPollIntervalMs,
+      fetchImpl,
+      shouldContinue() {
+        return !closed && child.exitCode == null;
+      },
+    }).then((didBecomeReady) => {
+      if (!didBecomeReady) {
+        return;
+      }
+
+      emitStatus(onStatus, {
+        type: "public_ready",
+        publicUrl,
+        at: formatStatusTimestamp(),
+      });
+    }).catch(() => {});
   }
 }
 
@@ -306,6 +364,7 @@ async function waitForPublicTunnelReady({
   timeoutMs,
   pollIntervalMs = DEFAULT_TUNNEL_READY_POLL_INTERVAL_MS,
   fetchImpl = globalThis.fetch,
+  shouldContinue = () => true,
 } = {}) {
   if (!publicUrl) {
     throw new Error("A public tunnel URL is required before readiness can be checked.");
@@ -318,15 +377,15 @@ async function waitForPublicTunnelReady({
   const healthUrl = `${publicUrl.replace(/\/+$/, "")}/healthz`;
   let lastError = null;
 
-  while (Date.now() - startedAt < timeoutMs) {
+  while (shouldContinue() && !hasWaitDeadlineElapsed(startedAt, timeoutMs)) {
     try {
       const response = await fetchImpl(healthUrl, {
         method: "GET",
         redirect: "follow",
-        signal: AbortSignal.timeout(Math.min(3_000, timeoutMs)),
+        signal: AbortSignal.timeout(getTunnelHealthRequestTimeout(timeoutMs)),
       });
       if (response?.ok) {
-        return;
+        return true;
       }
 
       lastError = new Error(`HTTP ${response?.status || "unknown"}`);
@@ -335,6 +394,10 @@ async function waitForPublicTunnelReady({
     }
 
     await delay(pollIntervalMs);
+  }
+
+  if (!shouldContinue()) {
+    return false;
   }
 
   const detail = lastError?.message ? ` Last check: ${lastError.message}.` : "";
@@ -394,6 +457,34 @@ function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function emitStatus(callback, status) {
+  if (typeof callback !== "function") {
+    return;
+  }
+
+  callback(status);
+}
+
+function formatStatusTimestamp(date = new Date()) {
+  return date.toISOString();
+}
+
+function getTunnelHealthRequestTimeout(timeoutMs) {
+  if (!Number.isFinite(timeoutMs)) {
+    return 3_000;
+  }
+
+  return Math.min(3_000, timeoutMs);
+}
+
+function hasWaitDeadlineElapsed(startedAt, timeoutMs) {
+  if (!Number.isFinite(timeoutMs)) {
+    return false;
+  }
+
+  return Date.now() - startedAt >= timeoutMs;
 }
 
 module.exports = {

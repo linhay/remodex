@@ -25,8 +25,14 @@ async function main() {
     let managedRelay = null;
 
     if (options.tryCloudflare) {
+      console.log("[remodex] Starting the local relay...");
+      console.log("[remodex] Requesting a TryCloudflare URL...");
+
       managedRelay = await startTryCloudflareRelay({
         port: options.tryCloudflarePort,
+        onStatus(status) {
+          handleTryCloudflareStatus(status);
+        },
         onTunnelExit(error) {
           console.error(`[remodex] ${(error && error.message) || "TryCloudflare exited unexpectedly."}`);
           process.exit(1);
@@ -38,9 +44,8 @@ async function main() {
       console.log(`[remodex] TryCloudflare relay: ${managedRelay.relayUrl}`);
       if (managedRelay.readinessWarning) {
         console.warn(
-          `[remodex] TryCloudflare was created, but the public health check did not pass before startup: ${managedRelay.readinessWarning}`
+          `[remodex] The public tunnel is still warming up. The QR code below will work once the tunnel becomes reachable.`
         );
-        console.warn("[remodex] Continuing anyway; the bridge will keep retrying until the tunnel becomes reachable.");
       }
     }
 
@@ -79,4 +84,48 @@ async function main() {
   console.error(`Unknown command: ${command}`);
   console.error("Usage: remodex up [--trycloudflare] [--trycloudflare-port <port>] | remodex resume | remodex watch [threadId]");
   process.exit(1);
+}
+
+function handleTryCloudflareStatus(status) {
+  if (!status || typeof status !== "object") {
+    return;
+  }
+
+  if (status.type === "public_url_discovered") {
+    console.log(
+      `[remodex] TryCloudflare assigned a public URL at ${formatStatusTime(status.at)}.`
+    );
+    return;
+  }
+
+  if (status.type === "public_pending") {
+    console.log(
+      `[remodex] Public tunnel not reachable yet as of ${formatStatusTime(status.at)}. Waiting a bit longer before giving up on readiness checks.`
+    );
+    return;
+  }
+
+  if (status.type === "public_ready") {
+    console.log(
+      `[remodex] Public tunnel reachable at ${formatStatusTime(status.at)}. You can scan the QR code now.`
+    );
+  }
+}
+
+function formatStatusTime(timestamp) {
+  if (!timestamp) {
+    return "unknown time";
+  }
+
+  const parsed = new Date(timestamp);
+  if (Number.isNaN(parsed.getTime())) {
+    return timestamp;
+  }
+
+  return parsed.toLocaleTimeString([], {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }

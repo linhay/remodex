@@ -131,11 +131,15 @@ test("waitForPublicTunnelReady fails with a clear timeout error when health chec
 
 test("startTryCloudflareTunnel keeps startup alive when public readiness checks time out", async () => {
   const child = createFakeChildProcess();
+  const statuses = [];
   const startup = startTryCloudflareTunnel({
     localUrl: "http://127.0.0.1:8787",
     cloudflaredBin: "cloudflared",
     readyTimeoutMs: 20,
     readyPollIntervalMs: 0,
+    onStatus(status) {
+      statuses.push(status.type);
+    },
     async fetchImpl() {
       throw new Error("connect ECONNRESET");
     },
@@ -155,9 +159,43 @@ test("startTryCloudflareTunnel keeps startup alive when public readiness checks 
   assert.equal(tunnel.publicUrl, "https://alpha-beta.trycloudflare.com");
   assert.equal(tunnel.socketBaseUrl, "wss://alpha-beta.trycloudflare.com");
   assert.match(tunnel.readinessWarning, /Timed out waiting for public tunnel readiness/);
+  assert.deepEqual(statuses, ["public_url_discovered", "public_pending"]);
 
   await tunnel.close();
   assert.equal(child.killSignals[0], "SIGTERM");
+});
+
+test("startTryCloudflareTunnel emits a ready status once the public tunnel becomes reachable", async () => {
+  const child = createFakeChildProcess();
+  const statuses = [];
+  const startup = startTryCloudflareTunnel({
+    localUrl: "http://127.0.0.1:8787",
+    cloudflaredBin: "cloudflared",
+    readyTimeoutMs: 200,
+    readyPollIntervalMs: 0,
+    onStatus(status) {
+      statuses.push(status.type);
+    },
+    async fetchImpl() {
+      return { ok: true, status: 200 };
+    },
+    spawnImpl() {
+      queueMicrotask(() => {
+        child.stdout.emit("data", Buffer.from(
+          "INF Your quick Tunnel has been created! Visit it at https://alpha-beta.trycloudflare.com\n",
+          "utf8"
+        ));
+      });
+      return child;
+    },
+  });
+
+  const tunnel = await startup;
+
+  assert.equal(tunnel.publicReadyAt.length > 0, true);
+  assert.deepEqual(statuses, ["public_url_discovered", "public_ready"]);
+
+  await tunnel.close();
 });
 
 test("startLocalRelayServer forwards messages between the Mac and iPhone roles", async () => {

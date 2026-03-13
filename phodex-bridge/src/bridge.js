@@ -20,8 +20,12 @@ const { handleWorkspaceRequest } = require("./workspace-handler");
 const { loadOrCreateBridgeDeviceState } = require("./secure-device-state");
 const { createBridgeSecureTransport } = require("./secure-transport");
 
-function startBridge() {
+function startBridge(options = {}) {
   const config = readBridgeConfig();
+  if (options.relayUrlOverride) {
+    config.relayUrl = options.relayUrlOverride;
+  }
+  const beforeShutdown = createSingleRunCallback(options.beforeShutdown);
   const sessionId = uuidv4();
   const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
   const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
@@ -57,6 +61,7 @@ function startBridge() {
   });
 
   codex.onError((error) => {
+    beforeShutdown();
     if (config.codexEndpoint) {
       console.error(`[remodex] Failed to connect to Codex endpoint: ${config.codexEndpoint}`);
     } else {
@@ -98,6 +103,7 @@ function startBridge() {
       shutdown(codex, () => socket, () => {
         isShuttingDown = true;
         clearReconnectTimer();
+        beforeShutdown();
       });
       return;
     }
@@ -188,6 +194,7 @@ function startBridge() {
     clearReconnectTimer();
     stopContextUsageWatcher();
     desktopRefresher.handleTransportReset();
+    beforeShutdown();
     if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
       socket.close();
     }
@@ -196,10 +203,12 @@ function startBridge() {
   process.on("SIGINT", () => shutdown(codex, () => socket, () => {
     isShuttingDown = true;
     clearReconnectTimer();
+    beforeShutdown();
   }));
   process.on("SIGTERM", () => shutdown(codex, () => socket, () => {
     isShuttingDown = true;
     clearReconnectTimer();
+    beforeShutdown();
   }));
 
   // Routes decrypted app payloads through the same bridge handlers as before.
@@ -389,6 +398,21 @@ function shutdown(codex, getSocket, beforeExit = () => {}) {
   codex.shutdown();
 
   setTimeout(() => process.exit(0), 100);
+}
+
+function createSingleRunCallback(callback) {
+  if (typeof callback !== "function") {
+    return () => {};
+  }
+
+  let invoked = false;
+  return () => {
+    if (invoked) {
+      return;
+    }
+    invoked = true;
+    callback();
+  };
 }
 
 function extractBridgeMessageContext(rawMessage) {

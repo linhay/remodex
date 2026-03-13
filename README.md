@@ -182,7 +182,15 @@ REMODEX_CODEX_ENDPOINT=ws://localhost:8080 remodex up
 
 # Use a custom relay endpoint (`ws://` is unencrypted)
 REMODEX_RELAY=ws://localhost:9000/relay remodex up
+
+# Start an embedded local relay and expose it through a temporary TryCloudflare tunnel
+remodex up --trycloudflare
+
+# Pin the embedded relay to a fixed local port before opening the tunnel
+remodex up --trycloudflare --trycloudflare-port 8787
 ```
+
+`--trycloudflare` starts a local relay on your Mac, launches `cloudflared`, and prints a temporary public `wss://.../relay` URL that the QR payload uses automatically. Install Cloudflare Tunnel first and make sure `cloudflared` is on your `PATH` (for example: Homebrew on macOS, or the official Linux packages from https://developers.cloudflare.com/tunnel/setup/). Quick Tunnel hostnames are ephemeral, so re-run the command and re-scan the QR code whenever Cloudflare gives you a new URL.
 
 ## Pairing and Safety
 

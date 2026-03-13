@@ -5,40 +5,72 @@
 // Exports: none
 // Depends on: ../src
 
-const { startBridge, openLastActiveThread, watchThreadRollout } = require("../src");
+const {
+  parseCliArgs,
+  startBridge,
+  startTryCloudflareRelay,
+  openLastActiveThread,
+  watchThreadRollout,
+} = require("../src");
 
-const command = process.argv[2] || "up";
+main().catch((error) => {
+  console.error(`[remodex] ${(error && error.message) || "Unexpected failure."}`);
+  process.exit(1);
+});
 
-if (command === "up") {
-  startBridge();
-  return;
-}
+async function main() {
+  const { command, options, positionals } = parseCliArgs(process.argv.slice(2));
 
-if (command === "resume") {
-  try {
-    const state = openLastActiveThread();
-    console.log(
-      `[remodex] Opened last active thread: ${state.threadId} (${state.source || "unknown"})`
-    );
-  } catch (error) {
-    console.error(`[remodex] ${(error && error.message) || "Failed to reopen the last thread."}`);
-    process.exit(1);
+  if (command === "up") {
+    let managedRelay = null;
+
+    if (options.tryCloudflare) {
+      managedRelay = await startTryCloudflareRelay({
+        port: options.tryCloudflarePort,
+        onTunnelExit(error) {
+          console.error(`[remodex] ${(error && error.message) || "TryCloudflare exited unexpectedly."}`);
+          process.exit(1);
+        },
+      });
+
+      console.log(`[remodex] Local relay: ${managedRelay.httpUrl}`);
+      console.log(`[remodex] Health check: ${managedRelay.healthUrl}`);
+      console.log(`[remodex] TryCloudflare relay: ${managedRelay.relayUrl}`);
+    }
+
+    startBridge({
+      relayUrlOverride: managedRelay?.relayUrl,
+      beforeShutdown() {
+        managedRelay?.close().catch(() => {});
+      },
+    });
+    return;
   }
-  return;
-}
 
-if (command === "watch") {
-  try {
-    watchThreadRollout(process.argv[3] || "");
-  } catch (error) {
-    console.error(`[remodex] ${(error && error.message) || "Failed to watch the thread rollout."}`);
-    process.exit(1);
+  if (command === "resume") {
+    try {
+      const state = openLastActiveThread();
+      console.log(
+        `[remodex] Opened last active thread: ${state.threadId} (${state.source || "unknown"})`
+      );
+    } catch (error) {
+      console.error(`[remodex] ${(error && error.message) || "Failed to reopen the last thread."}`);
+      process.exit(1);
+    }
+    return;
   }
-  return;
-}
 
-if (command !== "up") {
+  if (command === "watch") {
+    try {
+      watchThreadRollout(positionals[0] || "");
+    } catch (error) {
+      console.error(`[remodex] ${(error && error.message) || "Failed to watch the thread rollout."}`);
+      process.exit(1);
+    }
+    return;
+  }
+
   console.error(`Unknown command: ${command}`);
-  console.error("Usage: remodex up | remodex resume | remodex watch [threadId]");
+  console.error("Usage: remodex up [--trycloudflare] [--trycloudflare-port <port>] | remodex resume | remodex watch [threadId]");
   process.exit(1);
 }

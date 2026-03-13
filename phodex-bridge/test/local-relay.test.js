@@ -14,6 +14,7 @@ const {
   extractTryCloudflareUrl,
   getCloudflaredInstallHint,
   startLocalRelayServer,
+  waitForPublicTunnelReady,
 } = require("../src/local-relay");
 
 test("parseCliArgs reads TryCloudflare flags for `up`", () => {
@@ -88,6 +89,42 @@ test("getCloudflaredInstallHint provides Linux-safe guidance without macOS-speci
   assert.match(hint, /Linux instructions/);
   assert.match(hint, /developers\.cloudflare\.com\/tunnel\/setup/);
   assert.doesNotMatch(hint, /brew install cloudflared/);
+});
+
+test("waitForPublicTunnelReady retries until the public health endpoint responds", async () => {
+  let attempts = 0;
+
+  await waitForPublicTunnelReady({
+    publicUrl: "https://alpha-beta.trycloudflare.com",
+    timeoutMs: 200,
+    pollIntervalMs: 0,
+    async fetchImpl(url) {
+      attempts += 1;
+      assert.equal(url, "https://alpha-beta.trycloudflare.com/healthz");
+
+      if (attempts < 3) {
+        throw new Error("tunnel not ready yet");
+      }
+
+      return { ok: true, status: 200 };
+    },
+  });
+
+  assert.equal(attempts, 3);
+});
+
+test("waitForPublicTunnelReady fails with a clear timeout error when health checks never pass", async () => {
+  await assert.rejects(
+    () => waitForPublicTunnelReady({
+      publicUrl: "https://alpha-beta.trycloudflare.com",
+      timeoutMs: 20,
+      pollIntervalMs: 0,
+      async fetchImpl() {
+        throw new Error("connect ECONNRESET");
+      },
+    }),
+    /Timed out waiting for public tunnel readiness/
+  );
 });
 
 test("startLocalRelayServer forwards messages between the Mac and iPhone roles", async () => {

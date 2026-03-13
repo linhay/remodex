@@ -1,7 +1,7 @@
 // FILE: local-relay.js
 // Purpose: Starts a local relay server and optionally exposes it through a TryCloudflare tunnel.
 // Layer: CLI helper
-// Exports: startLocalRelayServer, startTryCloudflareRelay, extractTryCloudflareUrl, createTunnelLaunchError, getCloudflaredInstallHint
+// Exports: startLocalRelayServer, startTryCloudflareRelay, extractTryCloudflareUrl, createTunnelLaunchError, getCloudflaredInstallHint, waitForPublicTunnelReady
 
 const http = require("node:http");
 const { spawn } = require("node:child_process");
@@ -10,6 +10,7 @@ const { setupRelay, getRelayStats } = require("./relay-core");
 
 const DEFAULT_RELAY_HOST = "127.0.0.1";
 const DEFAULT_TUNNEL_READY_TIMEOUT_MS = 20_000;
+const DEFAULT_TUNNEL_READY_POLL_INTERVAL_MS = 250;
 const TRYCLOUDFLARE_URL_PATTERN = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/ig;
 const CLOUDFLARED_SETUP_DOCS_URL = "https://developers.cloudflare.com/tunnel/setup/";
 
@@ -113,6 +114,7 @@ async function startTryCloudflareTunnel({
   cloudflaredBin,
   readyTimeoutMs,
   onUnexpectedExit,
+  fetchImpl = globalThis.fetch,
   spawnImpl = spawn,
 } = {}) {
   if (!localUrl) {
@@ -132,6 +134,7 @@ async function startTryCloudflareTunnel({
   let outputBuffer = "";
   let resolved = false;
   let closed = false;
+  let publicReadyPromise = null;
   let readyTimeout = null;
 
   const registerLogChunk = (chunk) => {
@@ -175,26 +178,38 @@ async function startTryCloudflareTunnel({
 
       registerLogChunk(chunk);
       const publicUrl = extractTryCloudflareUrl(outputBuffer) || extractTryCloudflareUrl(recentLogs.join("\n"));
-      if (!publicUrl) {
+      if (!publicUrl || publicReadyPromise) {
         return;
       }
 
-      resolved = true;
-      clearTimeout(readyTimeout);
-      const socketBaseUrl = upgradeHttpUrlToWebSocket(publicUrl);
-      resolve({
+      publicReadyPromise = waitForPublicTunnelReady({
         publicUrl,
-        socketBaseUrl,
-        async close() {
-          if (closed) {
-            return;
-          }
-          closed = true;
-          if (child.exitCode == null && !child.killed) {
-            child.kill("SIGTERM");
-          }
-          await onceExit(child);
-        },
+        timeoutMs: readyTimeoutMs,
+        fetchImpl,
+      }).then(() => {
+        if (resolved) {
+          return;
+        }
+
+        resolved = true;
+        clearTimeout(readyTimeout);
+        const socketBaseUrl = upgradeHttpUrlToWebSocket(publicUrl);
+        resolve({
+          publicUrl,
+          socketBaseUrl,
+          async close() {
+            if (closed) {
+              return;
+            }
+            closed = true;
+            if (child.exitCode == null && !child.killed) {
+              child.kill("SIGTERM");
+            }
+            await onceExit(child);
+          },
+        });
+      }).catch((error) => {
+        fail(createTunnelStartupError(error.message, recentLogs));
       });
     };
 
@@ -272,6 +287,46 @@ function getCloudflaredInstallHint(platform = process.platform) {
   return `Install Cloudflare Tunnel and ensure \`cloudflared\` is on your PATH. Docs: ${CLOUDFLARED_SETUP_DOCS_URL}`;
 }
 
+async function waitForPublicTunnelReady({
+  publicUrl,
+  timeoutMs,
+  pollIntervalMs = DEFAULT_TUNNEL_READY_POLL_INTERVAL_MS,
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  if (!publicUrl) {
+    throw new Error("A public tunnel URL is required before readiness can be checked.");
+  }
+  if (typeof fetchImpl !== "function") {
+    throw new Error("Global fetch is unavailable; cannot verify tunnel readiness.");
+  }
+
+  const startedAt = Date.now();
+  const healthUrl = `${publicUrl.replace(/\/+$/, "")}/healthz`;
+  let lastError = null;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const response = await fetchImpl(healthUrl, {
+        method: "GET",
+        redirect: "follow",
+        signal: AbortSignal.timeout(Math.min(3_000, timeoutMs)),
+      });
+      if (response?.ok) {
+        return;
+      }
+
+      lastError = new Error(`HTTP ${response?.status || "unknown"}`);
+    } catch (error) {
+      lastError = error;
+    }
+
+    await delay(pollIntervalMs);
+  }
+
+  const detail = lastError?.message ? ` Last check: ${lastError.message}.` : "";
+  throw new Error(`Timed out waiting for public tunnel readiness at ${healthUrl} after ${timeoutMs} ms.${detail}`);
+}
+
 function listen(server, port, host) {
   return new Promise((resolve, reject) => {
     const handleError = (error) => {
@@ -321,10 +376,17 @@ function onceExit(child) {
   });
 }
 
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 module.exports = {
   createTunnelLaunchError,
   extractTryCloudflareUrl,
   getCloudflaredInstallHint,
   startLocalRelayServer,
   startTryCloudflareRelay,
+  waitForPublicTunnelReady,
 };

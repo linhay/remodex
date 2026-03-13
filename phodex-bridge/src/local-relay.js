@@ -1,7 +1,7 @@
 // FILE: local-relay.js
 // Purpose: Starts a local relay server and optionally exposes it through a TryCloudflare tunnel.
 // Layer: CLI helper
-// Exports: startLocalRelayServer, startTryCloudflareRelay, extractTryCloudflareUrl, createTunnelLaunchError, getCloudflaredInstallHint, waitForPublicTunnelReady
+// Exports: startLocalRelayServer, startTryCloudflareRelay, startTryCloudflareTunnel, extractTryCloudflareUrl, createTunnelLaunchError, getCloudflaredInstallHint, waitForPublicTunnelReady
 
 const http = require("node:http");
 const { spawn } = require("node:child_process");
@@ -113,6 +113,7 @@ async function startTryCloudflareTunnel({
   localUrl,
   cloudflaredBin,
   readyTimeoutMs,
+  readyPollIntervalMs = DEFAULT_TUNNEL_READY_POLL_INTERVAL_MS,
   onUnexpectedExit,
   fetchImpl = globalThis.fetch,
   spawnImpl = spawn,
@@ -182,9 +183,11 @@ async function startTryCloudflareTunnel({
         return;
       }
 
+      clearTimeout(readyTimeout);
       publicReadyPromise = waitForPublicTunnelReady({
         publicUrl,
         timeoutMs: readyTimeoutMs,
+        pollIntervalMs: readyPollIntervalMs,
         fetchImpl,
       }).then(() => {
         if (resolved) {
@@ -193,23 +196,15 @@ async function startTryCloudflareTunnel({
 
         resolved = true;
         clearTimeout(readyTimeout);
-        const socketBaseUrl = upgradeHttpUrlToWebSocket(publicUrl);
-        resolve({
-          publicUrl,
-          socketBaseUrl,
-          async close() {
-            if (closed) {
-              return;
-            }
-            closed = true;
-            if (child.exitCode == null && !child.killed) {
-              child.kill("SIGTERM");
-            }
-            await onceExit(child);
-          },
-        });
+        resolve(createTunnelHandle(publicUrl));
       }).catch((error) => {
-        fail(createTunnelStartupError(error.message, recentLogs));
+        if (resolved) {
+          return;
+        }
+
+        resolved = true;
+        clearTimeout(readyTimeout);
+        resolve(createTunnelHandle(publicUrl, error.message));
       });
     };
 
@@ -246,6 +241,25 @@ async function startTryCloudflareTunnel({
   });
 
   return startup;
+
+  function createTunnelHandle(publicUrl, readinessWarning = "") {
+    const socketBaseUrl = upgradeHttpUrlToWebSocket(publicUrl);
+    return {
+      publicUrl,
+      readinessWarning,
+      socketBaseUrl,
+      async close() {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        if (child.exitCode == null && !child.killed) {
+          child.kill("SIGTERM");
+        }
+        await onceExit(child);
+      },
+    };
+  }
 }
 
 function upgradeHttpUrlToWebSocket(urlString) {
@@ -388,5 +402,6 @@ module.exports = {
   getCloudflaredInstallHint,
   startLocalRelayServer,
   startTryCloudflareRelay,
+  startTryCloudflareTunnel,
   waitForPublicTunnelReady,
 };

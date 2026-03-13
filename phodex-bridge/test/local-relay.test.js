@@ -6,6 +6,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const WebSocket = require("ws");
 
 const { parseCliArgs } = require("../src/cli-options");
@@ -14,6 +15,7 @@ const {
   extractTryCloudflareUrl,
   getCloudflaredInstallHint,
   startLocalRelayServer,
+  startTryCloudflareTunnel,
   waitForPublicTunnelReady,
 } = require("../src/local-relay");
 
@@ -127,6 +129,37 @@ test("waitForPublicTunnelReady fails with a clear timeout error when health chec
   );
 });
 
+test("startTryCloudflareTunnel keeps startup alive when public readiness checks time out", async () => {
+  const child = createFakeChildProcess();
+  const startup = startTryCloudflareTunnel({
+    localUrl: "http://127.0.0.1:8787",
+    cloudflaredBin: "cloudflared",
+    readyTimeoutMs: 20,
+    readyPollIntervalMs: 0,
+    async fetchImpl() {
+      throw new Error("connect ECONNRESET");
+    },
+    spawnImpl() {
+      queueMicrotask(() => {
+        child.stdout.emit("data", Buffer.from(
+          "INF Your quick Tunnel has been created! Visit it at https://alpha-beta.trycloudflare.com\n",
+          "utf8"
+        ));
+      });
+      return child;
+    },
+  });
+
+  const tunnel = await startup;
+
+  assert.equal(tunnel.publicUrl, "https://alpha-beta.trycloudflare.com");
+  assert.equal(tunnel.socketBaseUrl, "wss://alpha-beta.trycloudflare.com");
+  assert.match(tunnel.readinessWarning, /Timed out waiting for public tunnel readiness/);
+
+  await tunnel.close();
+  assert.equal(child.killSignals[0], "SIGTERM");
+});
+
 test("startLocalRelayServer forwards messages between the Mac and iPhone roles", async () => {
   const relay = await startLocalRelayServer();
   const sessionUrl = `ws://127.0.0.1:${relay.port}/relay/test-session`;
@@ -160,4 +193,23 @@ function onceOpen(socket) {
     socket.once("open", resolve);
     socket.once("error", reject);
   });
+}
+
+function createFakeChildProcess() {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.exitCode = null;
+  child.killed = false;
+  child.killSignals = [];
+  child.kill = (signal) => {
+    child.killed = true;
+    child.killSignals.push(signal);
+    child.exitCode = 0;
+    queueMicrotask(() => {
+      child.emit("exit", 0, signal);
+    });
+    return true;
+  };
+  return child;
 }

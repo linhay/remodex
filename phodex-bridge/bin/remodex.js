@@ -36,6 +36,12 @@ async function main() {
       console.log(`[remodex] Local relay: ${managedRelay.httpUrl}`);
       console.log(`[remodex] Health check: ${managedRelay.healthUrl}`);
       console.log(`[remodex] TryCloudflare relay: ${managedRelay.relayUrl}`);
+      if (managedRelay.readinessWarning) {
+        console.warn(
+          `[remodex] TryCloudflare was created, but the public health check did not pass before startup: ${managedRelay.readinessWarning}`
+        );
+        console.warn("[remodex] Continuing anyway; the bridge will keep retrying until the tunnel becomes reachable.");
+      }
     }
 
     startBridge({

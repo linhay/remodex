@@ -125,6 +125,24 @@ npm install
 npm start
 ```
 
+## Local LAN Launcher
+
+If you want the repo to start a local relay and bridge together, use the helper script from the repo root:
+
+```sh
+./run-local-remodex.sh
+./run-local-remodex.sh --hostname linhey.local --port 9000
+```
+
+Useful flags:
+
+- `--hostname`: Hostname or IP advertised to the phone for relay access
+- `--bind-host`: Interface/address the local relay listens on
+- `--port`: Relay port to listen on and advertise
+- `--dry-run`: Print the resolved relay configuration and bridge command without starting anything
+
+The script defaults to `0.0.0.0:9000` and prefers macOS `LocalHostName.local` when building the relay URL for the QR payload.
+
 ## Commands
 
 ### `remodex up`

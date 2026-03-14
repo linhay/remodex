@@ -535,6 +535,11 @@ function readBridgeConfig({ env = process.env, platform = process.platform } = {
       "wss://api.phodex.app/relay",
       env
     ),
+    relayAuthKey: readFirstDefinedEnv(
+      ["REMODEX_RELAY_KEY", "PHODEX_RELAY_KEY"],
+      "",
+      env
+    ),
     refreshEnabled: explicitRefreshEnabled == null
       ? defaultRefreshEnabled
       : explicitRefreshEnabled,

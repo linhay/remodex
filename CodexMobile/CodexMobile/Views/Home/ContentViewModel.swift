@@ -7,6 +7,23 @@
 import Foundation
 import Observation
 
+private func simDebugLog(_ message: String) {
+    #if targetEnvironment(simulator)
+    let line = "[sim-remodex] \(message)\n"
+    guard let data = line.data(using: .utf8) else { return }
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("remodex-sim-debug.log")
+
+    if FileManager.default.fileExists(atPath: url.path),
+       let handle = try? FileHandle(forWritingTo: url) {
+        defer { try? handle.close() }
+        try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    } else {
+        try? data.write(to: url, options: .atomic)
+    }
+    #endif
+}
+
 @MainActor
 @Observable
 final class ContentViewModel {
@@ -38,6 +55,7 @@ final class ContentViewModel {
     func connectToRelay(pairingPayload: CodexPairingQRPayload, codex: CodexService) async {
         await stopAutoReconnectForManualScan(codex: codex)
         let fullURL = "\(pairingPayload.relay)/\(pairingPayload.sessionId)"
+        simDebugLog("connectToRelay \(fullURL)")
         codex.rememberRelayPairing(pairingPayload)
 
         do {
@@ -46,7 +64,9 @@ final class ContentViewModel {
                 serverURL: fullURL,
                 performAutoRetry: true
             )
+            simDebugLog("connectToRelay succeeded \(fullURL)")
         } catch {
+            simDebugLog("connectToRelay failed \(fullURL) \(String(describing: error))")
             if codex.lastErrorMessage?.isEmpty ?? true {
                 codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
             }

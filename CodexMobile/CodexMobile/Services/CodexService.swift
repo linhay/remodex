@@ -215,6 +215,7 @@ final class CodexService {
     // Relay session persistence
     var relaySessionId: String?
     var relayUrl: String?
+    var relayAuthKey: String?
     var relayMacDeviceId: String?
     var relayMacIdentityPublicKey: String?
     var relayProtocolVersion: Int = codexSecureProtocolVersion
@@ -367,6 +368,7 @@ final class CodexService {
         // Restore relay session from Keychain
         self.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
         self.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
+        self.relayAuthKey = SecureStore.readString(for: CodexSecureKeys.relayAuthKey)
         self.relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)
         self.relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)
         if let rawProtocolVersion = SecureStore.readString(for: CodexSecureKeys.relayProtocolVersion),
@@ -401,6 +403,12 @@ final class CodexService {
     // Normalizes the persisted relay base URL before reuse in reconnect flows.
     var normalizedRelayURL: String? {
         relayUrl?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+    }
+
+    var normalizedRelayAuthKey: String? {
+        relayAuthKey?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
     }

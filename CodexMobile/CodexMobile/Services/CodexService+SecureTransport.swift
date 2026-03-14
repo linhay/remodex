@@ -250,12 +250,14 @@ extension CodexService {
     func rememberRelayPairing(_ payload: CodexPairingQRPayload) {
         SecureStore.writeString(payload.sessionId, for: CodexSecureKeys.relaySessionId)
         SecureStore.writeString(payload.relay, for: CodexSecureKeys.relayUrl)
+        SecureStore.writeString(payload.relayAuthKey ?? "", for: CodexSecureKeys.relayAuthKey)
         SecureStore.writeString(payload.macDeviceId, for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.writeString(payload.macIdentityPublicKey, for: CodexSecureKeys.relayMacIdentityPublicKey)
         SecureStore.writeString(String(codexSecureProtocolVersion), for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.writeString("0", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = payload.sessionId
         relayUrl = payload.relay
+        relayAuthKey = payload.relayAuthKey
         relayMacDeviceId = payload.macDeviceId
         relayMacIdentityPublicKey = payload.macIdentityPublicKey
         relayProtocolVersion = codexSecureProtocolVersion

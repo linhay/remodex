@@ -45,6 +45,7 @@ function startBridge() {
   const secureTransport = createBridgeSecureTransport({
     sessionId,
     relayUrl: relayBaseUrl,
+    relayAuthKey: config.relayAuthKey,
     deviceState,
   });
   let contextUsageWatcher = null;
@@ -93,8 +94,11 @@ function startBridge() {
       return;
     }
 
-    if (closeCode === 4000 || closeCode === 4001) {
+    if (closeCode === 4000 || closeCode === 4001 || closeCode === 4004) {
       logConnectionStatus("disconnected");
+      if (closeCode === 4004) {
+        console.error("[remodex] Relay authentication failed. Check REMODEX_RELAY_KEY on both the relay and bridge.");
+      }
       shutdown(codex, () => socket, () => {
         isShuttingDown = true;
         clearReconnectTimer();
@@ -121,8 +125,12 @@ function startBridge() {
     }
 
     logConnectionStatus("connecting");
+    const relayHeaders = { "x-role": "mac" };
+    if (config.relayAuthKey) {
+      relayHeaders["x-remodex-relay-key"] = config.relayAuthKey;
+    }
     const nextSocket = new WebSocket(relaySessionUrl, {
-      headers: { "x-role": "mac" },
+      headers: relayHeaders,
     });
     socket = nextSocket;
 

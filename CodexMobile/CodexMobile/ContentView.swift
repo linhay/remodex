@@ -6,6 +6,23 @@
 
 import SwiftUI
 
+private func simDebugLog(_ message: String) {
+    #if targetEnvironment(simulator)
+    let line = "[sim-remodex] \(message)\n"
+    guard let data = line.data(using: .utf8) else { return }
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("remodex-sim-debug.log")
+
+    if FileManager.default.fileExists(atPath: url.path),
+       let handle = try? FileHandle(forWritingTo: url) {
+        defer { try? handle.close() }
+        try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    } else {
+        try? data.write(to: url, options: .atomic)
+    }
+    #endif
+}
+
 struct ContentView: View {
     @Environment(CodexService.self) private var codex
     @Environment(\.scenePhase) private var scenePhase
@@ -30,6 +47,20 @@ struct ContentView: View {
         rootContent
             // Keep launch/foreground reconnect observers alive even while the QR scanner is visible.
             .task {
+                #if targetEnvironment(simulator)
+                hasSeenOnboarding = true
+                if !codex.isConnected,
+                   !codex.isConnecting,
+                   let simulatorPayload = simulatorPairingPayloadFromClipboard() {
+                    simDebugLog("found pairing payload for session \(simulatorPayload.sessionId)")
+                    await viewModel.connectToRelay(
+                        pairingPayload: simulatorPayload,
+                        codex: codex
+                    )
+                } else {
+                    simDebugLog("no valid simulator pairing payload on launch")
+                }
+                #endif
                 await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
             }
             .onChange(of: showSettings) { _, show in
@@ -373,6 +404,34 @@ struct ContentView: View {
                 isRetryingBridgeUpdate = false
             }
         }
+    }
+
+    private func simulatorPairingPayloadFromClipboard() -> CodexPairingQRPayload? {
+        #if targetEnvironment(simulator)
+        let environment = ProcessInfo.processInfo.environment
+        let rawValue = environment["REMODEX_SIM_PAIRING_PAYLOAD"]
+            ?? UIPasteboard.general.string
+
+        guard let trimmedValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let data = trimmedValue.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(CodexPairingQRPayload.self, from: data)
+        else {
+            return nil
+        }
+
+        let expiryDate = Date(timeIntervalSince1970: TimeInterval(payload.expiresAt) / 1000)
+        guard payload.v == codexPairingQRVersion,
+              !payload.relay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !payload.sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              expiryDate.addingTimeInterval(codexSecureClockSkewToleranceSeconds) >= Date()
+        else {
+            return nil
+        }
+
+        return payload
+        #else
+        return nil
+        #endif
     }
 
     // Switches the user back to the QR path when the old relay session is no longer useful.

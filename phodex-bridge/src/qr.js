@@ -11,6 +11,9 @@ function printQR(pairingPayload) {
 
   console.log("\nScan this QR with the iPhone:\n");
   qrcode.generate(payload, { small: true });
+  if (process.env.REMODEX_PRINT_PAIRING_JSON === "true") {
+    console.log(`Pairing Payload: ${payload}`);
+  }
   console.log(`\nSession ID: ${pairingPayload.sessionId}`);
   console.log(`Relay: ${pairingPayload.relay}`);
   console.log(`Device ID: ${pairingPayload.macDeviceId}`);

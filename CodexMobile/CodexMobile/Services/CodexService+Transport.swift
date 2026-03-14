@@ -161,9 +161,13 @@ extension CodexService {
         webSocketOptions.autoReplyPing = true
 
         if let role, !role.isEmpty {
-            webSocketOptions.setAdditionalHeaders([
+            var headers: [(name: String, value: String)] = [
                 (name: "x-role", value: role)
-            ])
+            ]
+            if let relayAuthKey = normalizedRelayAuthKey {
+                headers.append((name: "x-remodex-relay-key", value: relayAuthKey))
+            }
+            webSocketOptions.setAdditionalHeaders(headers)
         } else if !token.isEmpty {
             webSocketOptions.setAdditionalHeaders([
                 (name: "Authorization", value: "Bearer \(token)")

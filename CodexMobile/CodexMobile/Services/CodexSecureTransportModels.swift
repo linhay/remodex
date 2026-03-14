@@ -38,6 +38,66 @@ struct CodexPairingQRPayload: Codable, Sendable {
     let expiresAt: Int64
 }
 
+extension CodexPairingQRPayload {
+    static func parse(from rawValue: String) throws -> CodexPairingQRPayload {
+        let trimmedValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let data = trimmedValue.data(using: .utf8) else {
+            throw CodexSecureTransportError.invalidQR("QR code contains invalid text encoding.")
+        }
+
+        guard let payload = try? JSONDecoder().decode(CodexPairingQRPayload.self, from: data) else {
+            throw CodexSecureTransportError.invalidQR(
+                "Not a valid secure pairing code. Make sure you're scanning a QR from the latest Remodex bridge."
+            )
+        }
+
+        guard payload.v == codexPairingQRVersion else {
+            throw CodexSecureTransportError.incompatibleVersion(
+                "This QR code uses an unsupported pairing format. Update the iPhone app or the Mac bridge and try again."
+            )
+        }
+
+        guard !payload.relay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CodexSecureTransportError.invalidQR(
+                "QR code is missing the relay URL. Re-generate the code from the bridge."
+            )
+        }
+
+        guard !payload.sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CodexSecureTransportError.invalidQR(
+                "QR code is missing the session ID. Re-generate the code from the bridge."
+            )
+        }
+
+        let expiryDate = Date(timeIntervalSince1970: TimeInterval(payload.expiresAt) / 1000)
+        if expiryDate.addingTimeInterval(codexSecureClockSkewToleranceSeconds) < Date() {
+            throw CodexSecureTransportError.timedOut(
+                "This pairing QR code has expired. Generate a new one from the Mac bridge."
+            )
+        }
+
+        return payload
+    }
+}
+
+func simDebugLog(_ message: String) {
+    #if targetEnvironment(simulator)
+    let line = "[sim-remodex] \(message)\n"
+    guard let data = line.data(using: .utf8) else { return }
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("remodex-sim-debug.log")
+
+    if FileManager.default.fileExists(atPath: url.path),
+       let handle = try? FileHandle(forWritingTo: url) {
+        defer { try? handle.close() }
+        try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    } else {
+        try? data.write(to: url, options: .atomic)
+    }
+    #endif
+}
+
 struct CodexPhoneIdentityState: Codable, Sendable {
     let phoneDeviceId: String
     let phoneIdentityPrivateKey: String

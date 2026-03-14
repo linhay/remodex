@@ -54,12 +54,13 @@ The Cloudflare version keeps one Durable Object per `sessionId`, which preserves
 
 - WebSocket path: `/relay/{sessionId}`
 - Required header: `x-role: mac` or `x-role: iphone`
-- Close codes: `4000`, `4001`, `4002`, `4003`
+- Close codes: `4000`, `4001`, `4002`, `4003`, `4004`
 
 Deploy it from this folder:
 
 ```sh
 npm install
+wrangler secret put REMODEX_RELAY_KEY
 npm run deploy
 ```
 

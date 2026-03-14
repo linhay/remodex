@@ -5,16 +5,21 @@ const CLOSE_CODE_SESSION_UNAVAILABLE = 4002;
 const CLOSE_CODE_IPHONE_REPLACED = 4003;
 const CLOSE_CODE_FORBIDDEN = 4004;
 
+function normalizedRelayAuthKey(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const relayAuthKey = normalizedRelayAuthKey(env.REMODEX_RELAY_KEY);
 
     if (url.pathname === "/" || url.pathname === "/health") {
       return Response.json({
         ok: true,
         service: "remodex-relay",
         websocketPath: "/relay/:sessionId",
-        relayAuthEnabled: Boolean(env.REMODEX_RELAY_KEY),
+        relayAuthEnabled: Boolean(relayAuthKey),
       });
     }
 
@@ -46,6 +51,7 @@ export class RelaySession {
     const sessionId = match?.[1];
     const role = request.headers.get("x-role");
     const relayAuthKey = request.headers.get("x-remodex-relay-key")?.trim() || "";
+    const expectedRelayAuthKey = normalizedRelayAuthKey(this.env.REMODEX_RELAY_KEY);
 
     if (!sessionId || (role !== "mac" && role !== "iphone")) {
       return this.closeDuringUpgrade(
@@ -54,7 +60,7 @@ export class RelaySession {
       );
     }
 
-    if ((this.env.REMODEX_RELAY_KEY || "").trim() && relayAuthKey !== this.env.REMODEX_RELAY_KEY.trim()) {
+    if (expectedRelayAuthKey && relayAuthKey !== expectedRelayAuthKey) {
       return this.closeDuringUpgrade(
         CLOSE_CODE_FORBIDDEN,
         "Missing or invalid relay key"

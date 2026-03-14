@@ -25,7 +25,7 @@ function setupRelay(wss) {
 
   wss.on("connection", (ws, req) => {
     const urlPath = req.url || "";
-    const match = urlPath.match(/^\/relay\/([^/?]+)/);
+    const match = urlPath.match(/^\/relay\/([^/?]+)$/);
     const sessionId = match?.[1];
     const role = req.headers["x-role"];
     const relayAuthKey = normalizeHeaderValue(req.headers["x-remodex-relay-key"]);

@@ -6,23 +6,6 @@
 
 import SwiftUI
 
-private func simDebugLog(_ message: String) {
-    #if targetEnvironment(simulator)
-    let line = "[sim-remodex] \(message)\n"
-    guard let data = line.data(using: .utf8) else { return }
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent("remodex-sim-debug.log")
-
-    if FileManager.default.fileExists(atPath: url.path),
-       let handle = try? FileHandle(forWritingTo: url) {
-        defer { try? handle.close() }
-        try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
-    } else {
-        try? data.write(to: url, options: .atomic)
-    }
-    #endif
-}
-
 struct ContentView: View {
     @Environment(CodexService.self) private var codex
     @Environment(\.scenePhase) private var scenePhase
@@ -412,19 +395,8 @@ struct ContentView: View {
         let rawValue = environment["REMODEX_SIM_PAIRING_PAYLOAD"]
             ?? UIPasteboard.general.string
 
-        guard let trimmedValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let data = trimmedValue.data(using: .utf8),
-              let payload = try? JSONDecoder().decode(CodexPairingQRPayload.self, from: data)
-        else {
-            return nil
-        }
-
-        let expiryDate = Date(timeIntervalSince1970: TimeInterval(payload.expiresAt) / 1000)
-        guard payload.v == codexPairingQRVersion,
-              !payload.relay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !payload.sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              expiryDate.addingTimeInterval(codexSecureClockSkewToleranceSeconds) >= Date()
-        else {
+        guard let rawValue,
+              let payload = try? CodexPairingQRPayload.parse(from: rawValue) else {
             return nil
         }
 

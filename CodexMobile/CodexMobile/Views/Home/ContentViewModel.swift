@@ -7,23 +7,6 @@
 import Foundation
 import Observation
 
-private func simDebugLog(_ message: String) {
-    #if targetEnvironment(simulator)
-    let line = "[sim-remodex] \(message)\n"
-    guard let data = line.data(using: .utf8) else { return }
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent("remodex-sim-debug.log")
-
-    if FileManager.default.fileExists(atPath: url.path),
-       let handle = try? FileHandle(forWritingTo: url) {
-        defer { try? handle.close() }
-        try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
-    } else {
-        try? data.write(to: url, options: .atomic)
-    }
-    #endif
-}
-
 @MainActor
 @Observable
 final class ContentViewModel {

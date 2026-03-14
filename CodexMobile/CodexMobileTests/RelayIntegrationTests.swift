@@ -20,13 +20,13 @@ final class RelayIntegrationTests: XCTestCase {
         service.rememberRelayPairing(payload)
 
         let serverURL = "\(payload.relay)/\(payload.sessionId)"
+        let prompt = "relay key integration test"
         let thread = try await withRelayConnection(service: service, serverURL: serverURL) {
             try await service.startThread()
+        } afterConnect: { thread in
+            try await service.startTurn(userInput: prompt, threadId: thread.id)
+            try await Task.sleep(nanoseconds: 1_500_000_000)
         }
-
-        let prompt = "relay key integration test"
-        try await service.startTurn(userInput: prompt, threadId: thread.id)
-        try await Task.sleep(nanoseconds: 1_500_000_000)
 
         XCTAssertTrue(
             service.messages(for: thread.id).contains { message in
@@ -74,12 +74,14 @@ final class RelayIntegrationTests: XCTestCase {
     private func withRelayConnection<T>(
         service: CodexService,
         serverURL: String,
-        operation: () async throws -> T
+        operation: () async throws -> T,
+        afterConnect: ((T) async throws -> Void)? = nil
     ) async throws -> T {
         try await service.connect(serverURL: serverURL, token: "", role: "iphone")
 
         do {
             let result = try await operation()
+            try await afterConnect?(result)
             await service.disconnect()
             service.clearSavedRelaySession()
             return result

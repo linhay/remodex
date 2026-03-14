@@ -9,7 +9,7 @@ import Network
 import UIKit
 
 extension CodexService {
-    private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4002, 4003]
+    private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4002, 4003, 4004]
 
     // Opens the WebSocket and performs initialize/initialized handshake.
     func connect(

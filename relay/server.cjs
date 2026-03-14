@@ -2,8 +2,11 @@ const http = require("http");
 const { WebSocketServer } = require("ws");
 const { setupRelay, getRelayStats } = require("./relay-node.cjs");
 
-const port = Number.parseInt(process.env.PORT || "8787", 10);
+const port = normalizePort(process.env.PORT);
 const host = process.env.HOST || "127.0.0.1";
+const relayAuthKey = typeof process.env.REMODEX_RELAY_KEY === "string"
+  ? process.env.REMODEX_RELAY_KEY.trim()
+  : "";
 
 const server = http.createServer((req, res) => {
   if (req.url === "/" || req.url === "/health") {
@@ -11,7 +14,7 @@ const server = http.createServer((req, res) => {
       ok: true,
       service: "remodex-relay",
       websocketPath: "/relay/:sessionId",
-      relayAuthEnabled: Boolean(process.env.REMODEX_RELAY_KEY),
+      relayAuthEnabled: Boolean(relayAuthKey),
       ...getRelayStats(),
     });
 
@@ -47,3 +50,11 @@ function shutdown(signal) {
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+function normalizePort(value) {
+  const parsed = Number.parseInt(value || "8787", 10);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 65535) {
+    return 8787;
+  }
+  return parsed;
+}

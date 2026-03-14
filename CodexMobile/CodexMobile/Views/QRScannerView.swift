@@ -178,45 +178,7 @@ struct QRScannerView: View {
     }
 
     private func decodePairingPayload(from rawValue: String) throws -> CodexPairingQRPayload {
-        let trimmedValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard let data = trimmedValue.data(using: .utf8) else {
-            throw CodexSecureTransportError.invalidQR("QR code contains invalid text encoding.")
-        }
-
-        let decoder = JSONDecoder()
-        guard let payload = try? decoder.decode(CodexPairingQRPayload.self, from: data) else {
-            throw CodexSecureTransportError.invalidQR(
-                "Not a valid secure pairing code. Make sure you're scanning a QR from the latest Remodex bridge."
-            )
-        }
-
-        guard payload.v == codexPairingQRVersion else {
-            throw CodexSecureTransportError.incompatibleVersion(
-                "This QR code uses an unsupported pairing format. Update the iPhone app or the Mac bridge and try again."
-            )
-        }
-
-        guard !payload.relay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw CodexSecureTransportError.invalidQR(
-                "QR code is missing the relay URL. Re-generate the code from the bridge."
-            )
-        }
-
-        guard !payload.sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw CodexSecureTransportError.invalidQR(
-                "QR code is missing the session ID. Re-generate the code from the bridge."
-            )
-        }
-
-        let expiryDate = Date(timeIntervalSince1970: TimeInterval(payload.expiresAt) / 1000)
-        if expiryDate.addingTimeInterval(codexSecureClockSkewToleranceSeconds) < Date() {
-            throw CodexSecureTransportError.timedOut(
-                "This pairing QR code has expired. Generate a new one from the Mac bridge."
-            )
-        }
-
-        return payload
+        try CodexPairingQRPayload.parse(from: rawValue)
     }
 
     private func attemptSimulatorClipboardPairing() {

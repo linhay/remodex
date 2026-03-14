@@ -37,6 +37,11 @@ struct QRScannerView: View {
         .sheet(isPresented: $isShowingManualEntry) {
             manualEntrySheet
         }
+        .onChange(of: isShowingManualEntry) { _, isPresented in
+            if !isPresented {
+                clearManualEntry()
+            }
+        }
         .task {
             await checkCameraPermission()
             attemptSimulatorClipboardPairing()
@@ -171,10 +176,15 @@ struct QRScannerView: View {
         do {
             let payload = try decodePairingPayload(from: manualEntryText)
             isShowingManualEntry = false
+            clearManualEntry()
             onScan(payload)
         } catch {
             scannerError = error.localizedDescription
         }
+    }
+
+    private func clearManualEntry() {
+        manualEntryText = ""
     }
 
     private func decodePairingPayload(from rawValue: String) throws -> CodexPairingQRPayload {

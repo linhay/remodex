@@ -38,9 +38,13 @@ final class RelayIntegrationTests: XCTestCase {
 
     private func loadPairingPayloadFromEnvironment() throws -> CodexPairingQRPayload? {
         let environment = ProcessInfo.processInfo.environment
-        let rawValue = environment["REMODEX_SIM_PAIRING_PAYLOAD"]?
+        let inlinePayload = environment["REMODEX_SIM_PAIRING_PAYLOAD"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? loadPairingPayloadFromFile(path: environment["REMODEX_SIM_PAIRING_PAYLOAD_FILE"])
+        let filePath = environment["REMODEX_SIM_PAIRING_PAYLOAD_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawValue = inlinePayload?.isEmpty == false
+            ? inlinePayload
+            : loadPairingPayloadFromFile(path: filePath)
 
         guard let rawValue, !rawValue.isEmpty else {
             return nil
@@ -58,10 +62,11 @@ final class RelayIntegrationTests: XCTestCase {
     }
 
     private func loadPairingPayloadFromFile(path: String?) -> String? {
-        let trimmedPath = path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let candidatePath = trimmedPath.isEmpty ? "/tmp/remodex-relay-integration-payload.json" : trimmedPath
+        guard let path, !path.isEmpty else {
+            return nil
+        }
 
-        guard let data = FileManager.default.contents(atPath: candidatePath),
+        guard let data = FileManager.default.contents(atPath: path),
               let rawValue = String(data: data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
               !rawValue.isEmpty else {

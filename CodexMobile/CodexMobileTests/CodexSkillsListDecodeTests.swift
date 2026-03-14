@@ -69,7 +69,7 @@ final class CodexSkillsListDecodeTests: XCTestCase {
         XCTAssertTrue(requestedSourceKinds.contains("vscode"))
     }
 
-    func testListThreadsDefaultsToRecentProjectFocusedLimit() async throws {
+    func testListThreadsDefaultsToFullHistoryPagination() async throws {
         let service = makeService()
         var capturedParams: [RPCObject] = []
 
@@ -172,6 +172,55 @@ final class CodexSkillsListDecodeTests: XCTestCase {
         XCTAssertEqual(Set(service.threads.map(\.id)), Set(["active-1", "active-2", "archived-1", "archived-2"]))
         XCTAssertEqual(Set(service.threads.filter { $0.syncState == .live }.map(\.id)), Set(["active-1", "active-2"]))
         XCTAssertEqual(Set(service.threads.filter { $0.syncState == .archivedLocal }.map(\.id)), Set(["archived-1", "archived-2"]))
+    }
+
+    func testSyncThreadsListKeepsRealtimePollingScopedToRecentWindow() async {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+
+        var capturedParams: [RPCObject] = []
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "thread/list")
+            let object = params?.objectValue ?? [:]
+            capturedParams.append(object)
+
+            let archived = object["archived"]?.boolValue == true
+            switch archived {
+            case false:
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "data": .array([
+                            self.makeThreadJSON(id: "active-1", cwd: "/Users/me/work/app"),
+                        ]),
+                        "nextCursor": .string("active-cursor-2"),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case true:
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "data": .array([
+                            self.makeThreadJSON(id: "archived-1", cwd: "/Users/me/work/old"),
+                        ]),
+                        "nextCursor": .string("archived-cursor-2"),
+                    ]),
+                    includeJSONRPC: false
+                )
+            }
+        }
+
+        await service.syncThreadsList()
+
+        XCTAssertEqual(capturedParams.count, 2)
+        XCTAssertEqual(capturedParams[0]["limit"]?.intValue, service.realtimeThreadListLimit)
+        XCTAssertNil(capturedParams[0]["archived"]?.boolValue)
+        XCTAssertEqual(capturedParams[1]["limit"]?.intValue, service.realtimeThreadListLimit)
+        XCTAssertEqual(capturedParams[1]["archived"]?.boolValue, true)
+        XCTAssertEqual(Set(service.threads.map(\.id)), Set(["active-1", "archived-1"]))
     }
 
     func testDecodeSkillsListParsesBucketedDataShape() {

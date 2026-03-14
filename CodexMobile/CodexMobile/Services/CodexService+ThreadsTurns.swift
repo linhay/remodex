@@ -7,6 +7,9 @@
 import Foundation
 
 extension CodexService {
+    // Keeps high-frequency sync work bounded while manual refreshes can still page through full history.
+    var realtimeThreadListLimit: Int { 40 }
+
     func listThreads(limit: Int? = nil) async throws {
         isLoadingThreads = true
         defer { isLoadingThreads = false }

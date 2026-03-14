@@ -9,7 +9,7 @@ import Network
 import UIKit
 
 extension CodexService {
-    private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4002, 4003]
+    private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4002, 4003, 4004]
 
     // Opens the WebSocket and performs initialize/initialized handshake.
     func connect(
@@ -131,12 +131,14 @@ extension CodexService {
     func clearSavedRelaySession() {
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayAuthKey)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
         SecureStore.deleteValue(for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = nil
         relayUrl = nil
+        relayAuthKey = nil
         relayMacDeviceId = nil
         relayMacIdentityPublicKey = nil
         relayProtocolVersion = codexSecureProtocolVersion
@@ -548,6 +550,8 @@ extension CodexService {
             return "This relay session was replaced by another Mac connection. Scan a new QR code to reconnect."
         case 4003:
             return "This device was replaced by a newer connection. Scan a new QR code to reconnect."
+        case 4004:
+            return "Relay authentication failed. Update the relay key on both the Mac bridge and this app, then reconnect."
         default:
             return "This relay pairing is no longer valid. Scan a new QR code to reconnect."
         }

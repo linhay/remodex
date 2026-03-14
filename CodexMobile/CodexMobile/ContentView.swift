@@ -30,6 +30,20 @@ struct ContentView: View {
         rootContent
             // Keep launch/foreground reconnect observers alive even while the QR scanner is visible.
             .task {
+                #if targetEnvironment(simulator)
+                hasSeenOnboarding = true
+                if !codex.isConnected,
+                   !codex.isConnecting,
+                   let simulatorPayload = simulatorPairingPayloadFromClipboard() {
+                    simDebugLog("found pairing payload for session \(simulatorPayload.sessionId)")
+                    await viewModel.connectToRelay(
+                        pairingPayload: simulatorPayload,
+                        codex: codex
+                    )
+                } else {
+                    simDebugLog("no valid simulator pairing payload on launch")
+                }
+                #endif
                 await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
             }
             .onChange(of: showSettings) { _, show in
@@ -373,6 +387,23 @@ struct ContentView: View {
                 isRetryingBridgeUpdate = false
             }
         }
+    }
+
+    private func simulatorPairingPayloadFromClipboard() -> CodexPairingQRPayload? {
+        #if targetEnvironment(simulator)
+        let environment = ProcessInfo.processInfo.environment
+        let rawValue = environment["REMODEX_SIM_PAIRING_PAYLOAD"]
+            ?? UIPasteboard.general.string
+
+        guard let rawValue,
+              let payload = try? CodexPairingQRPayload.parse(from: rawValue) else {
+            return nil
+        }
+
+        return payload
+        #else
+        return nil
+        #endif
     }
 
     // Switches the user back to the QR path when the old relay session is no longer useful.

@@ -13,6 +13,8 @@ struct QRScannerView: View {
     @State private var scannerError: String?
     @State private var hasCameraPermission = false
     @State private var isCheckingPermission = true
+    @State private var isShowingManualEntry = false
+    @State private var manualEntryText = ""
 
     var body: some View {
         ZStack {
@@ -32,8 +34,17 @@ struct QRScannerView: View {
                 cameraPermissionView
             }
         }
+        .sheet(isPresented: $isShowingManualEntry) {
+            manualEntrySheet
+        }
+        .onChange(of: isShowingManualEntry) { _, isPresented in
+            if !isPresented {
+                clearManualEntry()
+            }
+        }
         .task {
             await checkCameraPermission()
+            attemptSimulatorClipboardPairing()
         }
         .alert("Scan Error", isPresented: Binding(
             get: { scannerError != nil },
@@ -56,6 +67,12 @@ struct QRScannerView: View {
             Text("Scan QR code from Remodex CLI")
                 .font(AppFont.subheadline(weight: .medium))
                 .foregroundStyle(.white)
+
+            Button("Use Pairing Code") {
+                isShowingManualEntry = true
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.white.opacity(0.18))
 
             Spacer()
         }
@@ -83,6 +100,11 @@ struct QRScannerView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
+
+            Button("Use Pairing Code Instead") {
+                isShowingManualEntry = true
+            }
+            .buttonStyle(.bordered)
         }
     }
 
@@ -100,45 +122,83 @@ struct QRScannerView: View {
     }
 
     private func handleScanResult(_ code: String, resetScanLock: @escaping () -> Void) {
-        guard let data = code.data(using: .utf8) else {
-            scannerError = "QR code contains invalid text encoding."
+        do {
+            onScan(try decodePairingPayload(from: code))
+        } catch {
+            scannerError = error.localizedDescription
             resetScanLock()
+        }
+    }
+
+    private var manualEntrySheet: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Paste the full pairing payload from the Remodex CLI QR output.")
+                    .font(AppFont.subheadline())
+                    .foregroundStyle(.secondary)
+
+                TextEditor(text: $manualEntryText)
+                    .font(AppFont.mono(.caption))
+                    .padding(12)
+                    .frame(minHeight: 220)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color(.secondarySystemBackground))
+                    )
+
+                Button("Paste from Clipboard") {
+                    manualEntryText = UIPasteboard.general.string ?? ""
+                }
+                .buttonStyle(.bordered)
+
+                Button("Connect") {
+                    submitManualEntry()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(manualEntryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                Spacer()
+            }
+            .padding(20)
+            .navigationTitle("Pairing Code")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Close") {
+                        isShowingManualEntry = false
+                    }
+                }
+            }
+        }
+    }
+
+    private func submitManualEntry() {
+        do {
+            let payload = try decodePairingPayload(from: manualEntryText)
+            isShowingManualEntry = false
+            clearManualEntry()
+            onScan(payload)
+        } catch {
+            scannerError = error.localizedDescription
+        }
+    }
+
+    private func clearManualEntry() {
+        manualEntryText = ""
+    }
+
+    private func decodePairingPayload(from rawValue: String) throws -> CodexPairingQRPayload {
+        try CodexPairingQRPayload.parse(from: rawValue)
+    }
+
+    private func attemptSimulatorClipboardPairing() {
+        #if targetEnvironment(simulator)
+        guard let clipboardValue = UIPasteboard.general.string,
+              let payload = try? decodePairingPayload(from: clipboardValue) else {
             return
         }
-
-        let decoder = JSONDecoder()
-        guard let payload = try? decoder.decode(CodexPairingQRPayload.self, from: data) else {
-            scannerError = "Not a valid secure pairing code. Make sure you're scanning a QR from the latest Remodex bridge."
-            resetScanLock()
-            return
-        }
-
-        guard payload.v == codexPairingQRVersion else {
-            scannerError = "This QR code uses an unsupported pairing format. Update the iPhone app or the Mac bridge and try again."
-            resetScanLock()
-            return
-        }
-
-        guard !payload.relay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            scannerError = "QR code is missing the relay URL. Re-generate the code from the bridge."
-            resetScanLock()
-            return
-        }
-
-        guard !payload.sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            scannerError = "QR code is missing the session ID. Re-generate the code from the bridge."
-            resetScanLock()
-            return
-        }
-
-        let expiryDate = Date(timeIntervalSince1970: TimeInterval(payload.expiresAt) / 1000)
-        if expiryDate.addingTimeInterval(codexSecureClockSkewToleranceSeconds) < Date() {
-            scannerError = "This pairing QR code has expired. Generate a new one from the Mac bridge."
-            resetScanLock()
-            return
-        }
-
         onScan(payload)
+        #endif
     }
 }
 

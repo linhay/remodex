@@ -38,6 +38,7 @@ final class ContentViewModel {
     func connectToRelay(pairingPayload: CodexPairingQRPayload, codex: CodexService) async {
         await stopAutoReconnectForManualScan(codex: codex)
         let fullURL = "\(pairingPayload.relay)/\(pairingPayload.sessionId)"
+        simDebugLog("connectToRelay \(fullURL)")
         codex.rememberRelayPairing(pairingPayload)
 
         do {
@@ -46,7 +47,9 @@ final class ContentViewModel {
                 serverURL: fullURL,
                 performAutoRetry: true
             )
+            simDebugLog("connectToRelay succeeded \(fullURL)")
         } catch {
+            simDebugLog("connectToRelay failed \(fullURL) \(String(describing: error))")
             if codex.lastErrorMessage?.isEmpty ?? true {
                 codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
             }

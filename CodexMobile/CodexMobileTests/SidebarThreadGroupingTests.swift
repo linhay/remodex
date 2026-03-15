@@ -286,6 +286,68 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertFalse(shouldReveal)
     }
 
+    func testProjectThreadPreviewStateShowsFirstFiveByDefault() {
+        let threads = (1...8).map { index in
+            makeThread(
+                id: "thread-\(index)",
+                updatedAt: Date(timeIntervalSince1970: TimeInterval(1_700_000_000 - index)),
+                cwd: "/Users/me/work/app"
+            )
+        }
+        let group = SidebarThreadGroup(
+            id: "project:/Users/me/work/app",
+            label: "app",
+            kind: .project,
+            sortDate: .now,
+            projectPath: "/Users/me/work/app",
+            threads: threads
+        )
+
+        let visible = SidebarProjectThreadPreviewState.visibleThreads(
+            for: group,
+            expandedGroupIDs: []
+        )
+
+        XCTAssertEqual(visible.map(\.id), ["thread-1", "thread-2", "thread-3", "thread-4", "thread-5"])
+        XCTAssertTrue(
+            SidebarProjectThreadPreviewState.shouldShowExpandToggle(
+                for: group,
+                expandedGroupIDs: []
+            )
+        )
+    }
+
+    func testProjectThreadPreviewStateShowsAllWhenExpanded() {
+        let threads = (1...8).map { index in
+            makeThread(
+                id: "thread-\(index)",
+                updatedAt: Date(timeIntervalSince1970: TimeInterval(1_700_000_000 - index)),
+                cwd: "/Users/me/work/app"
+            )
+        }
+        let group = SidebarThreadGroup(
+            id: "project:/Users/me/work/app",
+            label: "app",
+            kind: .project,
+            sortDate: .now,
+            projectPath: "/Users/me/work/app",
+            threads: threads
+        )
+
+        let visible = SidebarProjectThreadPreviewState.visibleThreads(
+            for: group,
+            expandedGroupIDs: Set([group.id])
+        )
+
+        XCTAssertEqual(visible.map(\.id), threads.map(\.id))
+        XCTAssertTrue(
+            SidebarProjectThreadPreviewState.shouldShowExpandToggle(
+                for: group,
+                expandedGroupIDs: Set([group.id])
+            )
+        )
+    }
+
     private func makeThread(
         id: String,
         updatedAt: Date,

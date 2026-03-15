@@ -11,6 +11,21 @@ import XCTest
 final class CodexSkillsListDecodeTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
+    actor AsyncGate {
+        private var continuation: CheckedContinuation<Void, Never>?
+
+        func wait() async {
+            await withCheckedContinuation { continuation in
+                self.continuation = continuation
+            }
+        }
+
+        func open() {
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
     func testFetchServerThreadsPaginatesAndRequestsExplicitSourceKinds() async throws {
         let service = makeService()
         var capturedParams: [RPCObject] = []
@@ -89,11 +104,90 @@ final class CodexSkillsListDecodeTests: XCTestCase {
 
         try await service.listThreads()
 
-        XCTAssertEqual(capturedParams.count, 2)
+        XCTAssertEqual(capturedParams.count, 1)
         XCTAssertNil(capturedParams[0]["limit"]?.intValue)
         XCTAssertNil(capturedParams[0]["archived"]?.boolValue)
-        XCTAssertNil(capturedParams[1]["limit"]?.intValue)
-        XCTAssertEqual(capturedParams[1]["archived"]?.boolValue, true)
+    }
+
+    func testListThreadsLoadsFirstPageBeforeBackgroundBackfill() async throws {
+        let service = makeService()
+        let backfillGate = AsyncGate()
+        var capturedParams: [RPCObject] = []
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "thread/list")
+            let object = params?.objectValue ?? [:]
+            capturedParams.append(object)
+
+            let archived = object["archived"]?.boolValue == true
+            let cursor = object["cursor"]
+
+            switch (archived, cursor) {
+            case (false, .some(.null)):
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "data": .array([
+                            self.makeThreadJSON(id: "active-1", cwd: "/Users/me/work/app"),
+                        ]),
+                        "nextCursor": .string("active-cursor-2"),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case (false, .some(.string("active-cursor-2"))):
+                await backfillGate.wait()
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "data": .array([
+                            self.makeThreadJSON(id: "active-2", cwd: "/Users/me/work/site"),
+                        ]),
+                        "nextCursor": .null,
+                    ]),
+                    includeJSONRPC: false
+                )
+            case (true, .some(.null)):
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "data": .array([
+                            self.makeThreadJSON(id: "archived-1", cwd: "/Users/me/work/old"),
+                        ]),
+                        "nextCursor": .null,
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected thread/list request: \(object)")
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "data": .array([]),
+                        "nextCursor": .null,
+                    ]),
+                    includeJSONRPC: false
+                )
+            }
+        }
+
+        let firstPageLoaded = XCTestExpectation(description: "listThreads returns after first active page")
+        Task {
+            do {
+                try await service.listThreads()
+                firstPageLoaded.fulfill()
+            } catch {
+                XCTFail("listThreads failed unexpectedly: \(error)")
+            }
+        }
+
+        await fulfillment(of: [firstPageLoaded], timeout: 0.5)
+        XCTAssertEqual(service.threads.map(\.id), ["active-1"])
+        XCTAssertFalse(service.isLoadingThreads)
+
+        await backfillGate.open()
+        try await waitUntil(timeoutNanoseconds: 1_000_000_000) {
+            Set(service.threads.map(\.id)) == Set(["active-1", "active-2", "archived-1"])
+        }
     }
 
     func testListThreadsPaginatesActiveAndArchivedResultsUntilCursorIsExhausted() async throws {
@@ -167,8 +261,11 @@ final class CodexSkillsListDecodeTests: XCTestCase {
         }
 
         try await service.listThreads()
+        try await waitUntil(timeoutNanoseconds: 1_000_000_000) {
+            Set(service.threads.map(\.id)) == Set(["active-1", "active-2", "archived-1", "archived-2"])
+        }
 
-        XCTAssertEqual(capturedParams.count, 4)
+        XCTAssertEqual(capturedParams.count, 5)
         XCTAssertEqual(Set(service.threads.map(\.id)), Set(["active-1", "active-2", "archived-1", "archived-2"]))
         XCTAssertEqual(Set(service.threads.filter { $0.syncState == .live }.map(\.id)), Set(["active-1", "active-2"]))
         XCTAssertEqual(Set(service.threads.filter { $0.syncState == .archivedLocal }.map(\.id)), Set(["archived-1", "archived-2"]))
@@ -292,5 +389,20 @@ final class CodexSkillsListDecodeTests: XCTestCase {
             "title": .string(id),
             "cwd": .string(cwd),
         ])
+    }
+
+    private func waitUntil(
+        timeoutNanoseconds: UInt64,
+        intervalNanoseconds: UInt64 = 10_000_000,
+        condition: @escaping @MainActor () -> Bool
+    ) async throws {
+        let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if condition() {
+                return
+            }
+            try await Task.sleep(nanoseconds: intervalNanoseconds)
+        }
+        XCTFail("Condition was not met within timeout")
     }
 }

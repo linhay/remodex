@@ -117,6 +117,9 @@ extension CodexService {
         supportsStructuredSkillInput = true
         supportsTurnCollaborationMode = false
         stopSyncLoop()
+        threadListBackfillTask?.cancel()
+        threadListBackfillTask = nil
+        threadListBackfillToken = nil
         postConnectSyncTask?.cancel()
         postConnectSyncTask = nil
         postConnectSyncToken = nil
@@ -222,6 +225,9 @@ extension CodexService {
         postConnectSyncTask?.cancel()
         postConnectSyncTask = nil
         postConnectSyncToken = nil
+        threadListBackfillTask?.cancel()
+        threadListBackfillTask = nil
+        threadListBackfillToken = nil
         isBootstrappingConnectionSync = false
         if shouldAttemptAutoRecovery {
             connectionRecoveryState = .retrying(attempt: 0, message: recoveryStatusMessage(for: error))

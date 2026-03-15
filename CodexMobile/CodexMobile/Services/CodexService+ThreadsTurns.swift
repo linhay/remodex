@@ -8,22 +8,52 @@ import Foundation
 
 extension CodexService {
     func listThreads(limit: Int? = nil) async throws {
+        threadListBackfillTask?.cancel()
+        threadListBackfillTask = nil
+        let backfillToken = UUID()
+        threadListBackfillToken = backfillToken
+
         isLoadingThreads = true
         defer { isLoadingThreads = false }
 
-        let activeThreads = try await fetchServerThreads(limit: limit)
-
-        var archivedThreads: [CodexThread] = []
-        do {
-            archivedThreads = try await fetchServerThreads(limit: limit, archived: true)
-        } catch {
-            debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
-        }
-
-        reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: archivedThreads)
+        let activeThreads = try await fetchServerThreads(limit: limit, paginateAll: limit != nil)
+        reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: [])
 
         if activeThreadId == nil {
             activeThreadId = threads.first(where: { $0.syncState == .live })?.id
+        }
+
+        guard limit == nil else {
+            return
+        }
+
+        threadListBackfillTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            let backfilledActiveThreads: [CodexThread]
+            do {
+                backfilledActiveThreads = try await self.fetchServerThreads()
+            } catch {
+                self.debugSyncLog("thread/list active backfill failed (non-fatal): \(error.localizedDescription)")
+                return
+            }
+
+            var archivedThreads: [CodexThread] = []
+            do {
+                archivedThreads = try await self.fetchServerThreads(archived: true)
+            } catch {
+                self.debugSyncLog("thread/list archived backfill failed (non-fatal): \(error.localizedDescription)")
+            }
+
+            guard !Task.isCancelled, self.threadListBackfillToken == backfillToken else {
+                return
+            }
+
+            self.reconcileLocalThreadsWithServer(backfilledActiveThreads, serverArchivedThreads: archivedThreads)
+
+            if self.activeThreadId == nil {
+                self.activeThreadId = self.threads.first(where: { $0.syncState == .live })?.id
+            }
         }
     }
 
@@ -454,7 +484,11 @@ enum CodexThreadStartProjectBinding {
 }
 
 extension CodexService {
-    func fetchServerThreads(limit: Int? = nil, archived: Bool = false) async throws -> [CodexThread] {
+    func fetchServerThreads(
+        limit: Int? = nil,
+        archived: Bool = false,
+        paginateAll: Bool = true
+    ) async throws -> [CodexThread] {
         var allThreads: [CodexThread] = []
         var nextCursor: JSONValue = .null
         var hasRequestedFirstPage = false
@@ -495,7 +529,8 @@ extension CodexService {
             let shouldContinue = shouldContinueThreadListPagination(
                 nextCursor: nextCursor,
                 limit: limit,
-                hasRequestedFirstPage: hasRequestedFirstPage
+                hasRequestedFirstPage: hasRequestedFirstPage,
+                paginateAll: paginateAll
             )
             guard shouldContinue else {
                 break
@@ -537,9 +572,10 @@ extension CodexService {
     private func shouldContinueThreadListPagination(
         nextCursor: JSONValue,
         limit: Int?,
-        hasRequestedFirstPage: Bool
+        hasRequestedFirstPage: Bool,
+        paginateAll: Bool
     ) -> Bool {
-        guard hasRequestedFirstPage, limit == nil else {
+        guard paginateAll, hasRequestedFirstPage, limit == nil else {
             return false
         }
 

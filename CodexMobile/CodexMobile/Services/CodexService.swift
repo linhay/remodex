@@ -257,6 +257,8 @@ final class CodexService {
     var threadListSyncTask: Task<Void, Never>?
     var activeThreadSyncTask: Task<Void, Never>?
     var runningThreadWatchSyncTask: Task<Void, Never>?
+    var threadListBackfillTask: Task<Void, Never>?
+    var threadListBackfillToken: UUID?
     var postConnectSyncTask: Task<Void, Never>?
     var postConnectSyncToken: UUID?
     var connectedServerIdentity: String?

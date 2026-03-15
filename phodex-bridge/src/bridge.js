@@ -45,6 +45,7 @@ function startBridge() {
   const secureTransport = createBridgeSecureTransport({
     sessionId,
     relayUrl: relayBaseUrl,
+    relayCandidates: config.relayCandidates,
     relayAuthKey: config.relayAuthKey,
     deviceState,
   });

@@ -248,8 +248,16 @@ extension CodexService {
 
     // Saves the QR-derived bridge metadata used for secure reconnects.
     func rememberRelayPairing(_ payload: CodexPairingQRPayload) {
+        let normalizedRelayCandidates = normalizeRelayCandidates(
+            primaryRelay: payload.relay,
+            candidates: payload.relayCandidates ?? []
+        )
+        let encodedRelayCandidates = (try? JSONEncoder().encode(normalizedRelayCandidates))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+
         SecureStore.writeString(payload.sessionId, for: CodexSecureKeys.relaySessionId)
         SecureStore.writeString(payload.relay, for: CodexSecureKeys.relayUrl)
+        SecureStore.writeString(encodedRelayCandidates, for: CodexSecureKeys.relayCandidates)
         SecureStore.writeString(payload.relayAuthKey ?? "", for: CodexSecureKeys.relayAuthKey)
         SecureStore.writeString(payload.macDeviceId, for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.writeString(payload.macIdentityPublicKey, for: CodexSecureKeys.relayMacIdentityPublicKey)
@@ -257,6 +265,7 @@ extension CodexService {
         SecureStore.writeString("0", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = payload.sessionId
         relayUrl = payload.relay
+        relayCandidates = normalizedRelayCandidates
         relayAuthKey = payload.relayAuthKey
         relayMacDeviceId = payload.macDeviceId
         relayMacIdentityPublicKey = payload.macIdentityPublicKey
@@ -291,6 +300,26 @@ extension CodexService {
             secureConnectionState = .notPaired
             secureMacFingerprint = nil
         }
+    }
+}
+
+private extension CodexService {
+    func normalizeRelayCandidates(primaryRelay: String, candidates: [String]) -> [String] {
+        var result: [String] = []
+        var seen = Set<String>()
+
+        func appendUnique(_ candidate: String) {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            let normalized = trimmed.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+            guard !normalized.isEmpty, !seen.contains(normalized) else { return }
+            seen.insert(normalized)
+            result.append(normalized)
+        }
+
+        appendUnique(primaryRelay)
+        candidates.forEach(appendUnique)
+        return result
     }
 }
 

@@ -48,10 +48,13 @@ struct ContentView: View {
                 await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
             }
             .onChange(of: showSettings) { _, show in
-                if show {
+                if ContentSettingsNavigationGate.shouldAppendSettingsRoute(
+                    showSettings: show,
+                    navigationPathIsEmpty: navigationPath.isEmpty
+                ) {
                     navigationPath.append("settings")
-                    showSettings = false
                 }
+                showSettings = false
             }
             .onChange(of: isSidebarOpen) { wasOpen, isOpen in
                 guard !wasOpen, isOpen else {
@@ -494,6 +497,15 @@ struct ContentView: View {
            let first = threads.first {
             selectedThread = first
         }
+    }
+}
+
+enum ContentSettingsNavigationGate {
+    static func shouldAppendSettingsRoute(
+        showSettings: Bool,
+        navigationPathIsEmpty: Bool
+    ) -> Bool {
+        showSettings && navigationPathIsEmpty
     }
 }
 

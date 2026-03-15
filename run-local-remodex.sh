@@ -224,8 +224,8 @@ cleanup() {
 trap cleanup INT TERM EXIT
 
 if [[ "$DRY_RUN" == "false" ]]; then
-  print_cmd env "HOST=$RELAY_BIND_HOST" "REMODEX_RELAY_KEY=$RELAY_KEY" node ./server.cjs '>' "$RELAY_LOG" "2>&1" '&' "(cwd: $RELAY_DIR)"
-  start_in_dir_background "$RELAY_DIR" "$RELAY_LOG" env "HOST=$RELAY_BIND_HOST" "REMODEX_RELAY_KEY=$RELAY_KEY" node ./server.cjs
+  print_cmd env "HOST=$RELAY_BIND_HOST" "PORT=$RELAY_PORT" "REMODEX_RELAY_KEY=$RELAY_KEY" node ./server.cjs '>' "$RELAY_LOG" "2>&1" '&' "(cwd: $RELAY_DIR)"
+  start_in_dir_background "$RELAY_DIR" "$RELAY_LOG" env "HOST=$RELAY_BIND_HOST" "PORT=$RELAY_PORT" "REMODEX_RELAY_KEY=$RELAY_KEY" node ./server.cjs
   RELAY_PID="$STARTED_PID"
   sleep 1
   if ! curl -sf "http://$RELAY_HOST:$RELAY_PORT/health" >/dev/null; then
@@ -234,7 +234,7 @@ if [[ "$DRY_RUN" == "false" ]]; then
     exit 1
   fi
 else
-  print_cmd env "HOST=$RELAY_BIND_HOST" "REMODEX_RELAY_KEY=$RELAY_KEY" node ./server.cjs '>' "$RELAY_LOG" "2>&1" '&' "(cwd: $RELAY_DIR)"
+  print_cmd env "HOST=$RELAY_BIND_HOST" "PORT=$RELAY_PORT" "REMODEX_RELAY_KEY=$RELAY_KEY" node ./server.cjs '>' "$RELAY_LOG" "2>&1" '&' "(cwd: $RELAY_DIR)"
   RELAY_PID=""
 fi
 
@@ -272,6 +272,21 @@ else
   RELAY_URL="ws://$HOSTNAME_VALUE:$RELAY_PORT/relay"
 fi
 
+LAN_HOSTNAME_VALUE="$HOSTNAME_VALUE"
+if [[ -z "$LAN_HOSTNAME_VALUE" ]]; then
+  if scutil --get LocalHostName >/dev/null 2>&1; then
+    LAN_HOSTNAME_VALUE="$(scutil --get LocalHostName).local"
+  else
+    LAN_HOSTNAME_VALUE="$(hostname).local"
+  fi
+fi
+LAN_RELAY_URL="ws://$LAN_HOSTNAME_VALUE:$RELAY_PORT/relay"
+
+RELAY_CANDIDATES="$RELAY_URL"
+if [[ "$LAN_RELAY_URL" != "$RELAY_URL" ]]; then
+  RELAY_CANDIDATES="$RELAY_CANDIDATES,$LAN_RELAY_URL"
+fi
+
 BRIDGE_PAIRING_CODE_ENV=""
 if [[ "$QR_MODE" == "none" ]]; then
   BRIDGE_PAIRING_CODE_ENV="true"
@@ -279,7 +294,7 @@ else
   BRIDGE_PAIRING_CODE_ENV="${REMODEX_PRINT_PAIRING_CODE:-false}"
 fi
 
-print_cmd bash -lc "cd $(printf '%q' "$BRIDGE_DIR") && REMODEX_RELAY=$(printf '%q' "$RELAY_URL") REMODEX_RELAY_KEY=$(printf '%q' "$RELAY_KEY") REMODEX_QR_MODE=$(printf '%q' "$QR_MODE") REMODEX_PRINT_PAIRING_CODE=$(printf '%q' "$BRIDGE_PAIRING_CODE_ENV") node ./bin/remodex.js up"
+print_cmd bash -lc "cd $(printf '%q' "$BRIDGE_DIR") && REMODEX_RELAY=$(printf '%q' "$RELAY_URL") REMODEX_RELAY_CANDIDATES=$(printf '%q' "$RELAY_CANDIDATES") REMODEX_RELAY_KEY=$(printf '%q' "$RELAY_KEY") REMODEX_QR_MODE=$(printf '%q' "$QR_MODE") REMODEX_PRINT_PAIRING_CODE=$(printf '%q' "$BRIDGE_PAIRING_CODE_ENV") node ./bin/remodex.js up"
 
 if [[ "$DRY_RUN" == "true" ]]; then
   exit 0
@@ -287,6 +302,7 @@ fi
 
 cd "$BRIDGE_DIR"
 REMODEX_RELAY="$RELAY_URL" \
+REMODEX_RELAY_CANDIDATES="$RELAY_CANDIDATES" \
 REMODEX_RELAY_KEY="$RELAY_KEY" \
 REMODEX_QR_MODE="$QR_MODE" \
 REMODEX_PRINT_PAIRING_CODE="$BRIDGE_PAIRING_CODE_ENV" \

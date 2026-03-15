@@ -35,8 +35,15 @@ const NEVER_EXPIRES_TIMESTAMP_MS = 8_640_000_000_000_000;
 const MAX_BRIDGE_OUTBOUND_MESSAGES = 500;
 const MAX_BRIDGE_OUTBOUND_BYTES = 10 * 1024 * 1024;
 
-function createBridgeSecureTransport({ sessionId, relayUrl, relayAuthKey = "", deviceState }) {
+function createBridgeSecureTransport({
+  sessionId,
+  relayUrl,
+  relayCandidates = [],
+  relayAuthKey = "",
+  deviceState,
+}) {
   const pairingExpiryConfig = resolvePairingExpiryConfig(process.env);
+  const normalizedRelayCandidates = normalizeRelayCandidates(relayUrl, relayCandidates);
   let currentDeviceState = deviceState;
   let pendingHandshake = null;
   let activeSession = null;
@@ -52,6 +59,7 @@ function createBridgeSecureTransport({ sessionId, relayUrl, relayAuthKey = "", d
     return {
       v: PAIRING_QR_VERSION,
       relay: relayUrl,
+      relayCandidates: normalizedRelayCandidates,
       relayAuthKey: relayAuthKey || undefined,
       sessionId,
       macDeviceId: currentDeviceState.macDeviceId,
@@ -512,6 +520,28 @@ function createBridgeSecureTransport({ sessionId, relayUrl, relayAuthKey = "", d
     isSecureChannelReady,
     queueOutboundApplicationMessage,
   };
+}
+
+function normalizeRelayCandidates(primaryRelayUrl, candidates) {
+  const result = [];
+  const seen = new Set();
+  const add = (value) => {
+    if (typeof value !== "string") {
+      return;
+    }
+    const normalized = value.trim().replace(/\/+$/, "");
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  };
+
+  add(primaryRelayUrl);
+  if (Array.isArray(candidates)) {
+    candidates.forEach((candidate) => add(candidate));
+  }
+  return result;
 }
 
 function debugSecureLog(message) {

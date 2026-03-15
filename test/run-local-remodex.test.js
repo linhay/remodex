@@ -53,6 +53,7 @@ test("custom relay URL skips cloudflared and uses the fixed public relay", () =>
   ]);
   assert.doesNotMatch(output, /cloudflared tunnel/);
   assert.match(output, /REMODEX_RELAY=wss:\/\/relay\.example\.com\/relay/);
+  assert.match(output, /REMODEX_RELAY_CANDIDATES=/);
 });
 
 test("named tunnel token file starts cloudflared with token file and fixed relay URL", () => {

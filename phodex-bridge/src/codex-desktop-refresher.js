@@ -516,6 +516,15 @@ class CodexDesktopRefresher {
 }
 
 function readBridgeConfig({ env = process.env, platform = process.platform } = {}) {
+  const relayUrl = readFirstDefinedEnv(
+    ["REMODEX_RELAY", "PHODEX_RELAY"],
+    "wss://api.phodex.app/relay",
+    env
+  );
+  const relayCandidates = parseRelayCandidates(
+    readFirstDefinedEnv(["REMODEX_RELAY_CANDIDATES", "PHODEX_RELAY_CANDIDATES"], "", env),
+    relayUrl
+  );
   const codexEndpoint = readFirstDefinedEnv(
     ["REMODEX_CODEX_ENDPOINT", "PHODEX_CODEX_ENDPOINT"],
     "",
@@ -530,11 +539,8 @@ function readBridgeConfig({ env = process.env, platform = process.platform } = {
   // Desktop refresh is opt-in for now because Codex.app still lacks true live updates.
   const defaultRefreshEnabled = false;
   return {
-    relayUrl: readFirstDefinedEnv(
-      ["REMODEX_RELAY", "PHODEX_RELAY"],
-      "wss://api.phodex.app/relay",
-      env
-    ),
+    relayUrl,
+    relayCandidates,
     relayAuthKey: readFirstDefinedEnv(
       ["REMODEX_RELAY_KEY", "PHODEX_RELAY_KEY"],
       "",
@@ -552,6 +558,30 @@ function readBridgeConfig({ env = process.env, platform = process.platform } = {
     codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_BUNDLE_ID, env),
     codexAppPath: DEFAULT_APP_PATH,
   };
+}
+
+function parseRelayCandidates(rawValue, fallbackRelayUrl) {
+  const candidates = [];
+  const seen = new Set();
+
+  const addCandidate = (value) => {
+    if (typeof value !== "string") {
+      return;
+    }
+    const normalized = value.trim().replace(/\/+$/, "");
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  addCandidate(fallbackRelayUrl);
+  rawValue
+    .split(",")
+    .forEach((candidate) => addCandidate(candidate));
+
+  return candidates;
 }
 
 function execFilePromise(command, args) {

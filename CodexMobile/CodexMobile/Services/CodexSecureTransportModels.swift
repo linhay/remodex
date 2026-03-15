@@ -31,6 +31,7 @@ enum CodexSecureConnectionState: Equatable, Sendable {
 struct CodexPairingQRPayload: Codable, Sendable {
     let v: Int
     let relay: String
+    let relayCandidates: [String]?
     let relayAuthKey: String?
     let sessionId: String
     let macDeviceId: String

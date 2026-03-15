@@ -16,31 +16,22 @@ struct SidebarView: View {
 
     let onClose: () -> Void
 
-    @State private var searchText = ""
-    @State private var isCreatingThread = false
-    @State private var groupedThreads: [SidebarThreadGroup] = []
-    @State private var isShowingNewChatProjectPicker = false
-    @State private var projectGroupPendingArchive: SidebarThreadGroup? = nil
-    @State private var threadPendingDeletion: CodexThread? = nil
-    @State private var createThreadErrorMessage: String? = nil
-    @State private var groupingRebuildDebouncer = SidebarGroupingRebuildDebouncer()
-    @State private var runBadgeStateByThreadID: [String: CodexThreadRunBadgeState] = [:]
-    @State private var sidebarDiffTotalsByThreadID: [String: TurnSessionDiffTotals] = [:]
-    @State private var sidebarMetricHydrationTask: Task<Void, Never>?
-    @State private var sidebarMetricRevision = 0
+    @State private var viewModel = SidebarViewModel()
 
     var body: some View {
+        @Bindable var viewModel = viewModel
+
         VStack(alignment: .leading, spacing: 0) {
             SidebarHeaderView()
 
-            SidebarSearchField(text: $searchText, isActive: $isSearchActive)
+            SidebarSearchField(text: $viewModel.searchText, isActive: $isSearchActive)
                 .padding(.horizontal, 16)
                 .padding(.top, 6)
                 .padding(.bottom, 6)
 
             SidebarNewChatButton(
-                isCreatingThread: isCreatingThread,
-                isEnabled: canCreateThread,
+                isCreatingThread: viewModel.isCreatingThread,
+                isEnabled: viewModel.canCreateThread(codex: codex),
                 statusMessage: nil,
                 action: handleNewChatButtonTap
             )
@@ -48,22 +39,22 @@ struct SidebarView: View {
             .padding(.bottom, 10)
 
             SidebarThreadListView(
-                isFiltering: !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                isFiltering: !viewModel.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 isConnected: codex.isConnected,
-                isCreatingThread: isCreatingThread,
+                isCreatingThread: viewModel.isCreatingThread,
                 threads: codex.threads,
-                groups: groupedThreads,
+                groups: viewModel.groupedThreads,
                 selectedThread: selectedThread,
                 bottomContentInset: 0,
                 timingLabelProvider: { SidebarRelativeTimeFormatter.compactLabel(for: $0) },
-                diffTotalsByThreadID: sidebarDiffTotalsByThreadID,
-                runBadgeStateByThreadID: runBadgeStateByThreadID,
+                diffTotalsByThreadID: viewModel.sidebarDiffTotalsByThreadID,
+                runBadgeStateByThreadID: viewModel.runBadgeStateByThreadID,
                 onSelectThread: selectThread,
                 onCreateThreadInProjectGroup: { group in
                     handleNewChatTap(preferredProjectPath: group.projectPath)
                 },
                 onArchiveProjectGroup: { group in
-                    projectGroupPendingArchive = group
+                    viewModel.projectGroupPendingArchive = group
                 },
                 onRenameThread: { thread, newName in
                     codex.renameThread(thread.id, name: newName)
@@ -79,7 +70,7 @@ struct SidebarView: View {
                     }
                 },
                 onDeleteThread: { thread in
-                    threadPendingDeletion = thread
+                    viewModel.threadPendingDeletion = thread
                 }
             )
             .refreshable {
@@ -95,21 +86,19 @@ struct SidebarView: View {
         .frame(maxHeight: .infinity)
         .background(Color(.systemBackground))
         .task {
-            rebuildGroupedThreads()
+            viewModel.rebuildGroupedThreads(codex: codex)
             if codex.isConnected, codex.threads.isEmpty {
                 await refreshThreads()
             }
         }
         .onChange(of: codex.threads) { _, _ in
-            scheduleGroupedThreadsRebuild()
+            viewModel.scheduleGroupedThreadsRebuild(codex: codex)
         }
-        .onChange(of: searchText) { _, _ in
-            scheduleGroupedThreadsRebuild()
+        .onChange(of: viewModel.searchText) { _, _ in
+            viewModel.scheduleGroupedThreadsRebuild(codex: codex)
         }
         .onDisappear {
-            groupingRebuildDebouncer.cancel()
-            sidebarMetricHydrationTask?.cancel()
-            sidebarMetricHydrationTask = nil
+            viewModel.cancelBackgroundWork()
         }
         .overlay {
             if codex.isLoadingThreads {
@@ -118,9 +107,9 @@ struct SidebarView: View {
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
         }
-        .sheet(isPresented: $isShowingNewChatProjectPicker) {
+        .sheet(isPresented: $viewModel.isShowingNewChatProjectPicker) {
             SidebarNewChatProjectPickerSheet(
-                choices: newChatProjectChoices,
+                choices: viewModel.newChatProjectChoices(from: codex.threads),
                 onSelectProject: { projectPath in
                     handleNewChatTap(preferredProjectPath: projectPath)
                 },
@@ -130,10 +119,10 @@ struct SidebarView: View {
             )
         }
         .confirmationDialog(
-            "Archive \"\(projectGroupPendingArchive?.label ?? "project")\"?",
+            "Archive \"\(viewModel.projectGroupPendingArchive?.label ?? "project")\"?",
             isPresented: Binding(
-                get: { projectGroupPendingArchive != nil },
-                set: { if !$0 { projectGroupPendingArchive = nil } }
+                get: { viewModel.projectGroupPendingArchive != nil },
+                set: { if !$0 { viewModel.projectGroupPendingArchive = nil } }
             ),
             titleVisibility: .visible
         ) {
@@ -141,45 +130,45 @@ struct SidebarView: View {
                 archivePendingProjectGroup()
             }
             Button("Cancel", role: .cancel) {
-                projectGroupPendingArchive = nil
+                viewModel.projectGroupPendingArchive = nil
             }
         } message: {
             Text("All active chats in this project will be archived.")
         }
         .confirmationDialog(
-            "Delete \"\(threadPendingDeletion?.displayTitle ?? "conversation")\"?",
+            "Delete \"\(viewModel.threadPendingDeletion?.displayTitle ?? "conversation")\"?",
             isPresented: Binding(
-                get: { threadPendingDeletion != nil },
-                set: { if !$0 { threadPendingDeletion = nil } }
+                get: { viewModel.threadPendingDeletion != nil },
+                set: { if !$0 { viewModel.threadPendingDeletion = nil } }
             ),
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive) {
-                if let thread = threadPendingDeletion {
+                if let thread = viewModel.threadPendingDeletion {
                     if selectedThread?.id == thread.id {
                         selectedThread = nil
                     }
                     codex.deleteThread(thread.id)
                 }
-                threadPendingDeletion = nil
+                viewModel.threadPendingDeletion = nil
             }
             Button("Cancel", role: .cancel) {
-                threadPendingDeletion = nil
+                viewModel.threadPendingDeletion = nil
             }
         }
         .alert(
             "Action failed",
             isPresented: Binding(
-                get: { createThreadErrorMessage != nil },
-                set: { if !$0 { createThreadErrorMessage = nil } }
+                get: { viewModel.createThreadErrorMessage != nil },
+                set: { if !$0 { viewModel.createThreadErrorMessage = nil } }
             ),
             actions: {
                 Button("OK", role: .cancel) {
-                    createThreadErrorMessage = nil
+                    viewModel.createThreadErrorMessage = nil
                 }
             },
             message: {
-                Text(createThreadErrorMessage ?? "Please try again.")
+                Text(viewModel.createThreadErrorMessage ?? "Please try again.")
             }
         )
     }
@@ -197,28 +186,28 @@ struct SidebarView: View {
 
     // Shows a native sheet so folder names and full paths stay readable on small screens.
     private func handleNewChatButtonTap() {
-        if newChatProjectChoices.isEmpty {
+        if viewModel.newChatProjectChoices(from: codex.threads).isEmpty {
             handleNewChatTap(preferredProjectPath: nil)
             return
         }
 
-        isShowingNewChatProjectPicker = true
+        viewModel.isShowingNewChatProjectPicker = true
     }
 
     private func handleNewChatTap(preferredProjectPath: String?) {
         Task { @MainActor in
             guard codex.isConnected else {
-                createThreadErrorMessage = "Connect to runtime first."
+                viewModel.createThreadErrorMessage = "Connect to runtime first."
                 return
             }
             guard codex.isInitialized else {
-                createThreadErrorMessage = "Runtime is still initializing. Wait a moment and retry."
+                viewModel.createThreadErrorMessage = "Runtime is still initializing. Wait a moment and retry."
                 return
             }
 
-            createThreadErrorMessage = nil
-            isCreatingThread = true
-            defer { isCreatingThread = false }
+            viewModel.createThreadErrorMessage = nil
+            viewModel.isCreatingThread = true
+            defer { viewModel.isCreatingThread = false }
 
             do {
                 let thread = try await codex.startThread(preferredProjectPath: preferredProjectPath)
@@ -227,13 +216,13 @@ struct SidebarView: View {
             } catch {
                 let message = error.localizedDescription
                 codex.lastErrorMessage = message
-                createThreadErrorMessage = message.isEmpty ? "Unable to create a chat right now." : message
+                viewModel.createThreadErrorMessage = message.isEmpty ? "Unable to create a chat right now." : message
             }
         }
     }
 
     private func selectThread(_ thread: CodexThread) {
-        searchText = ""
+        viewModel.searchText = ""
         codex.activeThreadId = thread.id
         codex.markThreadAsViewed(thread.id)
         selectedThread = thread
@@ -241,14 +230,14 @@ struct SidebarView: View {
     }
 
     private func openSettings() {
-        searchText = ""
+        viewModel.searchText = ""
         showSettings = true
         onClose()
     }
 
     // Archives every live chat in the selected project group and clears the current selection if needed.
     private func archivePendingProjectGroup() {
-        guard let group = projectGroupPendingArchive else { return }
+        guard let group = viewModel.projectGroupPendingArchive else { return }
 
         let threadIDs = SidebarThreadGrouping.liveThreadIDsForProjectGroup(group, in: codex.threads)
         let selectedThreadWasArchived = selectedThread.map { selected in
@@ -263,101 +252,7 @@ struct SidebarView: View {
             })
         }
 
-        projectGroupPendingArchive = nil
-    }
-
-    // Rebuilds sidebar sections only when the source thread array changes.
-    private func rebuildGroupedThreads() {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let source: [CodexThread]
-        if query.isEmpty {
-            source = codex.threads
-        } else {
-            source = codex.threads.filter {
-                $0.displayTitle.localizedCaseInsensitiveContains(query)
-                || $0.projectDisplayName.localizedCaseInsensitiveContains(query)
-            }
-        }
-        groupedThreads = SidebarThreadGrouping.makeGroups(from: source)
-        refreshSidebarThreadMetrics()
-    }
-
-    private func scheduleGroupedThreadsRebuild() {
-        groupingRebuildDebouncer.schedule {
-            rebuildGroupedThreads()
-        }
-    }
-
-    // Computes visible-thread metrics first, then hydrates off-screen rows shortly after to smooth first paint.
-    private func refreshSidebarThreadMetrics() {
-        sidebarMetricHydrationTask?.cancel()
-        sidebarMetricRevision += 1
-        let revision = sidebarMetricRevision
-
-        let visibleThreadIDs = SidebarThreadMetricStaging.visibleThreadIDs(from: groupedThreads)
-        let partition = SidebarThreadMetricStaging.partitionThreadIDs(from: codex.threads, visibleThreadIDs: visibleThreadIDs)
-
-        var visibleRunBadgeByThreadID: [String: CodexThreadRunBadgeState] = [:]
-        var visibleDiffTotalsByThreadID: [String: TurnSessionDiffTotals] = [:]
-
-        for threadID in partition.visible {
-            if let state = codex.threadRunBadgeState(for: threadID) {
-                visibleRunBadgeByThreadID[threadID] = state
-            }
-            if let totals = diffTotals(for: threadID) {
-                visibleDiffTotalsByThreadID[threadID] = totals
-            }
-        }
-
-        runBadgeStateByThreadID = visibleRunBadgeByThreadID
-        sidebarDiffTotalsByThreadID = visibleDiffTotalsByThreadID
-
-        guard !partition.deferred.isEmpty else {
-            return
-        }
-
-        sidebarMetricHydrationTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 120_000_000)
-            guard !Task.isCancelled, revision == sidebarMetricRevision else {
-                return
-            }
-
-            var hydratedRunBadgeByThreadID = runBadgeStateByThreadID
-            var hydratedDiffTotalsByThreadID = sidebarDiffTotalsByThreadID
-
-            for threadID in partition.deferred {
-                if let state = codex.threadRunBadgeState(for: threadID) {
-                    hydratedRunBadgeByThreadID[threadID] = state
-                }
-                if let totals = diffTotals(for: threadID) {
-                    hydratedDiffTotalsByThreadID[threadID] = totals
-                }
-            }
-
-            guard !Task.isCancelled, revision == sidebarMetricRevision else {
-                return
-            }
-
-            runBadgeStateByThreadID = hydratedRunBadgeByThreadID
-            sidebarDiffTotalsByThreadID = hydratedDiffTotalsByThreadID
-        }
-    }
-
-    private func diffTotals(for threadID: String) -> TurnSessionDiffTotals? {
-        let messages = codex.messages(for: threadID)
-        return TurnSessionDiffSummaryCalculator.totals(
-            from: messages,
-            scope: .unpushedSession
-        )
-    }
-
-    // Keeps the chooser in sync with the same project buckets shown in the sidebar.
-    private var newChatProjectChoices: [SidebarProjectChoice] {
-        SidebarThreadGrouping.makeProjectChoices(from: codex.threads)
-    }
-
-    private var canCreateThread: Bool {
-        codex.isConnected && codex.isInitialized
+        viewModel.projectGroupPendingArchive = nil
     }
 }
 

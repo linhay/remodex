@@ -134,6 +134,7 @@ extension CodexService {
     func clearSavedRelaySession() {
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayCandidates)
         SecureStore.deleteValue(for: CodexSecureKeys.relayAuthKey)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
@@ -141,6 +142,7 @@ extension CodexService {
         SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = nil
         relayUrl = nil
+        relayCandidates = []
         relayAuthKey = nil
         relayMacDeviceId = nil
         relayMacIdentityPublicKey = nil

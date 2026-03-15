@@ -109,6 +109,10 @@ struct SettingsView: View {
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
+            Text("Domain: \(connectionDomainLabel)")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+
             Text("Security: \(codex.secureConnectionState.statusLabel)")
                 .font(AppFont.caption())
                 .foregroundStyle(codex.secureConnectionState == .encrypted ? .green : .secondary)
@@ -185,6 +189,10 @@ struct SettingsView: View {
         case .offline, .connected:
             return ""
         }
+    }
+
+    private var connectionDomainLabel: String {
+        SettingsConnectionDomainFormatter.domainLabel(from: codex.normalizedRelayURL)
     }
 
     // MARK: - Actions

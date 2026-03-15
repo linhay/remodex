@@ -10,23 +10,26 @@ import SwiftUI
 struct QRScannerView: View {
     let onScan: (CodexPairingQRPayload) -> Void
 
-    @State private var scannerError: String?
-    @State private var hasCameraPermission = false
-    @State private var isCheckingPermission = true
-    @State private var isShowingManualEntry = false
-    @State private var manualEntryText = ""
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var viewModel = QRScannerViewModel()
 
     var body: some View {
+        @Bindable var viewModel = viewModel
+
         ZStack {
             Color.black.ignoresSafeArea()
 
-            if isCheckingPermission {
+            if viewModel.isCheckingPermission {
                 ProgressView()
                     .tint(.white)
-            } else if hasCameraPermission {
-                QRCameraPreview { code, resetScanLock in
+            } else if viewModel.hasCameraPermission {
+                QRCameraPreview(
+                    isSessionActive: isCameraSessionActive,
+                    onScan: { code, resetScanLock in
                     handleScanResult(code, resetScanLock: resetScanLock)
-                }
+                    }
+                )
                 .ignoresSafeArea()
 
                 scannerOverlay
@@ -34,12 +37,12 @@ struct QRScannerView: View {
                 cameraPermissionView
             }
         }
-        .sheet(isPresented: $isShowingManualEntry) {
+        .sheet(isPresented: $viewModel.isShowingManualEntry) {
             manualEntrySheet
         }
-        .onChange(of: isShowingManualEntry) { _, isPresented in
+        .onChange(of: viewModel.isShowingManualEntry) { _, isPresented in
             if !isPresented {
-                clearManualEntry()
+                viewModel.clearManualEntry()
             }
         }
         .task {
@@ -47,34 +50,47 @@ struct QRScannerView: View {
             attemptSimulatorClipboardPairing()
         }
         .alert("Scan Error", isPresented: Binding(
-            get: { scannerError != nil },
-            set: { if !$0 { scannerError = nil } }
+            get: { viewModel.scannerError != nil },
+            set: { if !$0 { viewModel.scannerError = nil } }
         )) {
-            Button("OK", role: .cancel) { scannerError = nil }
+            Button("OK", role: .cancel) { viewModel.scannerError = nil }
         } message: {
-            Text(scannerError ?? "Invalid QR code")
+            Text(viewModel.scannerError ?? "Invalid QR code")
         }
     }
 
+    private var isCameraSessionActive: Bool {
+        QRScannerCameraSessionPolicy.shouldRunCameraSession(
+            hasCameraPermission: viewModel.hasCameraPermission,
+            isShowingManualEntry: viewModel.isShowingManualEntry,
+            scenePhase: scenePhase
+        )
+    }
+
     private var scannerOverlay: some View {
-        VStack(spacing: 24) {
-            Spacer()
+        ZStack(alignment: .bottomLeading) {
+            VStack(spacing: 24) {
+                Spacer()
 
-            RoundedRectangle(cornerRadius: 20)
-                .stroke(Color.white.opacity(0.6), lineWidth: 2)
-                .frame(width: 250, height: 250)
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(Color.white.opacity(0.6), lineWidth: 2)
+                    .frame(width: 250, height: 250)
 
-            Text("Scan QR code from Remodex CLI")
-                .font(AppFont.subheadline(weight: .medium))
-                .foregroundStyle(.white)
+                Text("Scan QR code from Remodex CLI")
+                    .font(AppFont.subheadline(weight: .medium))
+                    .foregroundStyle(.white)
 
-            Button("Use Pairing Code") {
-                isShowingManualEntry = true
+                Spacer()
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.white.opacity(0.18))
 
-            Spacer()
+            FloatingIconCircleButton(
+                systemImage: "keyboard",
+                colorScheme: colorScheme,
+                accessibilityLabel: "Use Pairing Code",
+                action: { viewModel.isShowingManualEntry = true }
+            )
+            .padding(.leading, 20)
+            .padding(.bottom, 28)
         }
     }
 
@@ -102,7 +118,7 @@ struct QRScannerView: View {
             .buttonStyle(.borderedProminent)
 
             Button("Use Pairing Code Instead") {
-                isShowingManualEntry = true
+                viewModel.isShowingManualEntry = true
             }
             .buttonStyle(.bordered)
         }
@@ -112,20 +128,20 @@ struct QRScannerView: View {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         switch status {
         case .authorized:
-            hasCameraPermission = true
+            viewModel.hasCameraPermission = true
         case .notDetermined:
-            hasCameraPermission = await AVCaptureDevice.requestAccess(for: .video)
+            viewModel.hasCameraPermission = await AVCaptureDevice.requestAccess(for: .video)
         default:
-            hasCameraPermission = false
+            viewModel.hasCameraPermission = false
         }
-        isCheckingPermission = false
+        viewModel.isCheckingPermission = false
     }
 
     private func handleScanResult(_ code: String, resetScanLock: @escaping () -> Void) {
         do {
             onScan(try decodePairingPayload(from: code))
         } catch {
-            scannerError = error.localizedDescription
+            viewModel.scannerError = error.localizedDescription
             resetScanLock()
         }
     }
@@ -137,7 +153,7 @@ struct QRScannerView: View {
                     .font(AppFont.subheadline())
                     .foregroundStyle(.secondary)
 
-                TextEditor(text: $manualEntryText)
+                TextEditor(text: $viewModel.manualEntryText)
                     .font(AppFont.mono(.caption))
                     .padding(12)
                     .frame(minHeight: 220)
@@ -147,7 +163,7 @@ struct QRScannerView: View {
                     )
 
                 Button("Paste from Clipboard") {
-                    manualEntryText = UIPasteboard.general.string ?? ""
+                    viewModel.manualEntryText = UIPasteboard.general.string ?? ""
                 }
                 .buttonStyle(.bordered)
 
@@ -155,7 +171,7 @@ struct QRScannerView: View {
                     submitManualEntry()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(manualEntryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!viewModel.canSubmitManualEntry)
 
                 Spacer()
             }
@@ -165,7 +181,7 @@ struct QRScannerView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Close") {
-                        isShowingManualEntry = false
+                        viewModel.dismissManualEntry()
                     }
                 }
             }
@@ -174,17 +190,12 @@ struct QRScannerView: View {
 
     private func submitManualEntry() {
         do {
-            let payload = try decodePairingPayload(from: manualEntryText)
-            isShowingManualEntry = false
-            clearManualEntry()
+            let payload = try decodePairingPayload(from: viewModel.manualEntryText)
+            viewModel.dismissManualEntry()
             onScan(payload)
         } catch {
-            scannerError = error.localizedDescription
+            viewModel.scannerError = error.localizedDescription
         }
-    }
-
-    private func clearManualEntry() {
-        manualEntryText = ""
     }
 
     private func decodePairingPayload(from rawValue: String) throws -> CodexPairingQRPayload {
@@ -202,9 +213,20 @@ struct QRScannerView: View {
     }
 }
 
+enum QRScannerCameraSessionPolicy {
+    static func shouldRunCameraSession(
+        hasCameraPermission: Bool,
+        isShowingManualEntry: Bool,
+        scenePhase: ScenePhase
+    ) -> Bool {
+        hasCameraPermission && !isShowingManualEntry && scenePhase == .active
+    }
+}
+
 // MARK: - Camera Preview UIViewRepresentable
 
 private struct QRCameraPreview: UIViewRepresentable {
+    let isSessionActive: Bool
     let onScan: (String, _ resetScanLock: @escaping () -> Void) -> Void
 
     func makeUIView(context: Context) -> QRCameraUIView {
@@ -214,10 +236,13 @@ private struct QRCameraPreview: UIViewRepresentable {
                 view?.resetScanLock()
             }
         }
+        view.setSessionRunning(isSessionActive)
         return view
     }
 
-    func updateUIView(_ uiView: QRCameraUIView, context: Context) {}
+    func updateUIView(_ uiView: QRCameraUIView, context: Context) {
+        uiView.setSessionRunning(isSessionActive)
+    }
 }
 
 private class QRCameraUIView: UIView, AVCaptureMetadataOutputObjectsDelegate {
@@ -265,9 +290,6 @@ private class QRCameraUIView: UIView, AVCaptureMetadataOutputObjectsDelegate {
         self.layer.addSublayer(layer)
         previewLayer = layer
 
-        sessionQueue.async { [weak self] in
-            self?.captureSession.startRunning()
-        }
     }
 
     func metadataOutput(
@@ -291,10 +313,27 @@ private class QRCameraUIView: UIView, AVCaptureMetadataOutputObjectsDelegate {
         hasScanned = false
     }
 
+    func setSessionRunning(_ isRunning: Bool) {
+        let session = captureSession
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if isRunning {
+                if !session.isRunning {
+                    session.startRunning()
+                }
+                self.hasScanned = false
+            } else if session.isRunning {
+                session.stopRunning()
+            }
+        }
+    }
+
     deinit {
         let session = captureSession
         sessionQueue.async {
-            session.stopRunning()
+            if session.isRunning {
+                session.stopRunning()
+            }
         }
     }
 }

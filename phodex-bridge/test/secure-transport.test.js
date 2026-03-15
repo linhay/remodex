@@ -120,6 +120,33 @@ test("pairing payload supports non-expiring mode when REMODEX_PAIRING_TTL_MS=nev
   }
 });
 
+test("pairing payload includes normalized relayCandidates for automatic network fallback", () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const privateJwk = privateKey.export({ format: "jwk" });
+  const publicJwk = publicKey.export({ format: "jwk" });
+  const secureTransport = createBridgeSecureTransport({
+    sessionId: "session-relay-candidates",
+    relayUrl: "wss://relay.section.trade/relay/",
+    relayCandidates: [
+      "ws://linhey.local:8788/relay",
+      "wss://relay.section.trade/relay",
+      "ws://linhey.local:8788/relay/",
+    ],
+    deviceState: {
+      macDeviceId: "mac-relay-candidates",
+      macIdentityPrivateKey: base64UrlToBase64(privateJwk.d),
+      macIdentityPublicKey: base64UrlToBase64(publicJwk.x),
+      trustedPhones: {},
+    },
+  });
+
+  const payload = secureTransport.createPairingPayload();
+  assert.deepEqual(payload.relayCandidates, [
+    "wss://relay.section.trade/relay",
+    "ws://linhey.local:8788/relay",
+  ]);
+});
+
 test("secure transport rejects plaintext JSON-RPC before the secure handshake", () => {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const privateJwk = privateKey.export({ format: "jwk" });

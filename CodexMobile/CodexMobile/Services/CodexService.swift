@@ -215,6 +215,7 @@ final class CodexService {
     // Relay session persistence
     var relaySessionId: String?
     var relayUrl: String?
+    var relayCandidates: [String] = []
     var relayAuthKey: String?
     var relayMacDeviceId: String?
     var relayMacIdentityPublicKey: String?
@@ -370,6 +371,13 @@ final class CodexService {
         // Restore relay session from Keychain
         self.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
         self.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
+        if let rawRelayCandidates = SecureStore.readString(for: CodexSecureKeys.relayCandidates),
+           let data = rawRelayCandidates.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            self.relayCandidates = decoded
+        } else {
+            self.relayCandidates = []
+        }
         self.relayAuthKey = SecureStore.readString(for: CodexSecureKeys.relayAuthKey)
         self.relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)
         self.relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)
@@ -392,7 +400,7 @@ final class CodexService {
 
     // Remembers whether we can offer reconnect without forcing a fresh QR scan.
     var hasSavedRelaySession: Bool {
-        normalizedRelaySessionId != nil && normalizedRelayURL != nil
+        normalizedRelaySessionId != nil && !normalizedRelayBaseURLsForReconnect.isEmpty
     }
 
     // Normalizes the persisted relay session id before reuse in reconnect flows.
@@ -407,6 +415,29 @@ final class CodexService {
         relayUrl?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
+    }
+
+    var normalizedRelayBaseURLsForReconnect: [String] {
+        var result: [String] = []
+        var seen = Set<String>()
+
+        func appendUnique(_ candidate: String?) {
+            guard let candidate = candidate?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty else {
+                return
+            }
+            let normalized = candidate.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+            guard !normalized.isEmpty, !seen.contains(normalized) else {
+                return
+            }
+            seen.insert(normalized)
+            result.append(normalized)
+        }
+
+        appendUnique(normalizedRelayURL)
+        relayCandidates.forEach { appendUnique($0) }
+        return result
     }
 
     var normalizedRelayAuthKey: String? {

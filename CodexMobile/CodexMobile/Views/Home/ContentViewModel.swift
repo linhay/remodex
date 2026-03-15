@@ -37,19 +37,19 @@ final class ContentViewModel {
     // Connects to the relay WebSocket using a scanned QR code payload.
     func connectToRelay(pairingPayload: CodexPairingQRPayload, codex: CodexService) async {
         await stopAutoReconnectForManualScan(codex: codex)
-        let fullURL = "\(pairingPayload.relay)/\(pairingPayload.sessionId)"
-        simDebugLog("connectToRelay \(fullURL)")
         codex.rememberRelayPairing(pairingPayload)
+        let serverURLs = await resolvedServerURLs(codex: codex)
+        simDebugLog("connectToRelay candidates \(serverURLs.joined(separator: ", "))")
 
         do {
             try await connectWithAutoRecovery(
                 codex: codex,
-                serverURL: fullURL,
+                serverURLs: serverURLs,
                 performAutoRetry: true
             )
-            simDebugLog("connectToRelay succeeded \(fullURL)")
+            simDebugLog("connectToRelay succeeded")
         } catch {
-            simDebugLog("connectToRelay failed \(fullURL) \(String(describing: error))")
+            simDebugLog("connectToRelay failed \(String(describing: error))")
             if codex.lastErrorMessage?.isEmpty ?? true {
                 codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
             }
@@ -68,16 +68,15 @@ final class ContentViewModel {
             return
         }
 
-        guard let sessionId = codex.normalizedRelaySessionId,
-              let relayUrl = codex.normalizedRelayURL else {
+        let serverURLs = await resolvedServerURLs(codex: codex)
+        guard !serverURLs.isEmpty else {
             return
         }
 
-        let fullURL = "\(relayUrl)/\(sessionId)"
         do {
             try await connectWithAutoRecovery(
                 codex: codex,
-                serverURL: fullURL,
+                serverURLs: serverURLs,
                 performAutoRetry: true
             )
         } catch {
@@ -109,16 +108,15 @@ final class ContentViewModel {
             return
         }
 
-        guard let sessionId = codex.normalizedRelaySessionId,
-              let relayUrl = codex.normalizedRelayURL else {
+        let serverURLs = await resolvedServerURLs(codex: codex)
+        guard !serverURLs.isEmpty else {
             return
         }
 
-        let fullURL = "\(relayUrl)/\(sessionId)"
         do {
             try await connectWithAutoRecovery(
                 codex: codex,
-                serverURL: fullURL,
+                serverURLs: serverURLs,
                 performAutoRetry: true
             )
         } catch {
@@ -141,8 +139,8 @@ final class ContentViewModel {
         // Keep trying while the relay pairing is still valid.
         // This lets network changes recover on their own instead of dropping back to a manual reconnect button.
         while codex.shouldAutoReconnectOnForeground, attempt < maxAttempts {
-            guard let sessionId = codex.normalizedRelaySessionId,
-                  let relayUrl = codex.normalizedRelayURL else {
+            let serverURLs = await resolvedServerURLs(codex: codex)
+            guard !serverURLs.isEmpty else {
                 codex.shouldAutoReconnectOnForeground = false
                 codex.connectionRecoveryState = .idle
                 return
@@ -160,19 +158,24 @@ final class ContentViewModel {
                 continue
             }
 
-            let fullURL = "\(relayUrl)/\(sessionId)"
-
-            do {
+            var lastError: Error?
+            for serverURL in serverURLs {
                 codex.connectionRecoveryState = .retrying(
                     attempt: max(1, attempt + 1),
                     message: "Reconnecting..."
                 )
-                try await connect(codex: codex, serverURL: fullURL)
-                codex.connectionRecoveryState = .idle
-                codex.lastErrorMessage = nil
-                codex.shouldAutoReconnectOnForeground = false
-                return
-            } catch {
+                do {
+                    try await connect(codex: codex, serverURL: serverURL)
+                    codex.connectionRecoveryState = .idle
+                    codex.lastErrorMessage = nil
+                    codex.shouldAutoReconnectOnForeground = false
+                    return
+                } catch {
+                    lastError = error
+                }
+            }
+
+            if let error = lastError {
                 let isRetryable = codex.isRecoverableTransientConnectionError(error)
                     || codex.isBenignBackgroundDisconnect(error)
 
@@ -212,7 +215,7 @@ extension ContentViewModel {
 
     func connectWithAutoRecovery(
         codex: CodexService,
-        serverURL: String,
+        serverURLs: [String],
         performAutoRetry: Bool
     ) async throws {
         guard !isRunningAutoReconnect else {
@@ -224,6 +227,9 @@ extension ContentViewModel {
 
         let maxAttemptIndex = performAutoRetry ? autoReconnectBackoffNanoseconds.count : 0
         var lastError: Error?
+        guard !serverURLs.isEmpty else {
+            throw CodexServiceError.invalidInput("No saved relay URL found.")
+        }
 
         for attemptIndex in 0...maxAttemptIndex {
             if attemptIndex > 0 {
@@ -233,31 +239,37 @@ extension ContentViewModel {
                 )
             }
 
-            do {
-                try await connect(codex: codex, serverURL: serverURL)
-                codex.connectionRecoveryState = .idle
-                codex.lastErrorMessage = nil
-                codex.shouldAutoReconnectOnForeground = false
-                return
-            } catch {
-                lastError = error
-                let isRetryable = codex.isRecoverableTransientConnectionError(error)
-                    || codex.isBenignBackgroundDisconnect(error)
-
-                guard performAutoRetry,
-                      isRetryable,
-                      attemptIndex < autoReconnectBackoffNanoseconds.count else {
+            for serverURL in serverURLs {
+                do {
+                    try await connect(codex: codex, serverURL: serverURL)
                     codex.connectionRecoveryState = .idle
+                    codex.lastErrorMessage = nil
                     codex.shouldAutoReconnectOnForeground = false
-                    codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
-                    throw error
-                }
+                    return
+                } catch {
+                    lastError = error
+                    let isRetryable = codex.isRecoverableTransientConnectionError(error)
+                        || codex.isBenignBackgroundDisconnect(error)
 
+                    guard performAutoRetry,
+                          isRetryable,
+                          attemptIndex < autoReconnectBackoffNanoseconds.count else {
+                        codex.connectionRecoveryState = .idle
+                        codex.shouldAutoReconnectOnForeground = false
+                        codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
+                        throw error
+                    }
+                }
+            }
+
+            if let lastError {
                 codex.lastErrorMessage = nil
                 codex.connectionRecoveryState = .retrying(
                     attempt: attemptIndex + 1,
-                    message: codex.recoveryStatusMessage(for: error)
+                    message: codex.recoveryStatusMessage(for: lastError)
                 )
+            }
+            if attemptIndex < autoReconnectBackoffNanoseconds.count {
                 try? await Task.sleep(nanoseconds: autoReconnectBackoffNanoseconds[attemptIndex])
             }
         }
@@ -268,5 +280,85 @@ extension ContentViewModel {
             codex.lastErrorMessage = codex.userFacingConnectFailureMessage(lastError)
             throw lastError
         }
+    }
+
+    func resolvedServerURLs(codex: CodexService) async -> [String] {
+        guard let sessionId = codex.normalizedRelaySessionId else {
+            return []
+        }
+        let prioritizedRelayBases = await prioritizeRelayBaseURLs(codex.normalizedRelayBaseURLsForReconnect)
+        return prioritizedRelayBases.map { "\($0)/\(sessionId)" }
+    }
+
+    // Prefers LAN relays only when they look reachable, otherwise keeps public relays first.
+    func prioritizeRelayBaseURLs(_ relayBaseURLs: [String]) async -> [String] {
+        let localURLs = relayBaseURLs.filter(isLikelyLANRelayURL)
+        guard !localURLs.isEmpty else {
+            return relayBaseURLs
+        }
+
+        for localURL in localURLs {
+            if await probeRelayHealth(baseURL: localURL) {
+                let remaining = relayBaseURLs.filter { $0 != localURL }
+                return [localURL] + remaining
+            }
+        }
+
+        let remoteURLs = relayBaseURLs.filter { !isLikelyLANRelayURL($0) }
+        return remoteURLs + localURLs
+    }
+
+    func isLikelyLANRelayURL(_ value: String) -> Bool {
+        guard let components = URLComponents(string: value.lowercased()),
+              let host = components.host else {
+            return false
+        }
+        if host.hasSuffix(".local") {
+            return true
+        }
+        if host == "localhost" || host == "127.0.0.1" {
+            return true
+        }
+        let octets = host.split(separator: ".")
+        if octets.count == 4,
+           let first = Int(octets[0]),
+           let second = Int(octets[1]) {
+            if first == 10 || first == 127 || (first == 192 && second == 168) {
+                return true
+            }
+            if first == 172 && (16...31).contains(second) {
+                return true
+            }
+        }
+        return false
+    }
+
+    func probeRelayHealth(baseURL: String) async -> Bool {
+        guard var components = URLComponents(string: baseURL) else {
+            return false
+        }
+        if components.scheme == "ws" {
+            components.scheme = "http"
+        } else if components.scheme == "wss" {
+            components.scheme = "https"
+        }
+        components.path = "/health"
+        components.query = nil
+        components.fragment = nil
+        guard let healthURL = components.url else {
+            return false
+        }
+
+        var request = URLRequest(url: healthURL)
+        request.timeoutInterval = 0.45
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let httpResponse = response as? HTTPURLResponse {
+                return (200...299).contains(httpResponse.statusCode)
+            }
+        } catch {}
+        return false
     }
 }

@@ -16,7 +16,8 @@ extension CodexService {
         isLoadingThreads = true
         defer { isLoadingThreads = false }
 
-        let activeThreads = try await fetchServerThreads(limit: limit, paginateAll: limit != nil)
+        let initialPageLimit = limit ?? 20
+        let activeThreads = try await fetchServerThreads(limit: initialPageLimit, paginateAll: false)
         reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: [])
 
         if activeThreadId == nil {

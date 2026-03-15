@@ -105,8 +105,55 @@ final class CodexSkillsListDecodeTests: XCTestCase {
         try await service.listThreads()
 
         XCTAssertEqual(capturedParams.count, 1)
-        XCTAssertNil(capturedParams[0]["limit"]?.intValue)
+        XCTAssertEqual(capturedParams[0]["limit"]?.intValue, 20)
         XCTAssertNil(capturedParams[0]["archived"]?.boolValue)
+    }
+
+    func testPerformPostConnectSyncPassLoadsThreadsBeforeModels() async throws {
+        let service = makeService()
+        var requestedMethods: [String] = []
+        var firstThreadListParams: RPCObject?
+
+        service.requestTransportOverride = { method, params in
+            requestedMethods.append(method)
+
+            switch method {
+            case "thread/list":
+                let object = params?.objectValue ?? [:]
+                if firstThreadListParams == nil {
+                    firstThreadListParams = object
+                }
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "data": .array([]),
+                        "nextCursor": .null,
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "model/list":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "data": .array([]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected request method: \(method)")
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([:]),
+                    includeJSONRPC: false
+                )
+            }
+        }
+
+        await service.performPostConnectSyncPass()
+
+        XCTAssertEqual(requestedMethods.first, "thread/list")
+        XCTAssertTrue(requestedMethods.contains("model/list"))
+        XCTAssertEqual(firstThreadListParams?["limit"]?.intValue, 20)
     }
 
     func testListThreadsLoadsFirstPageBeforeBackgroundBackfill() async throws {

@@ -42,7 +42,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Redmix needs camera access to let you take photos and attach them to your messages.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>CodexMobile needs local network access to connect to your Codex app-server running on your Mac.</string>
+	<string>Redmix needs local network access to connect to your Codex app-server running on your Mac.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>CodexMobile needs photo library access to let you attach images to your messages.</string>
 	<key>PHODEX_API_URL</key>

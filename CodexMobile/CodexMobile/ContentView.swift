@@ -34,14 +34,15 @@ struct ContentView: View {
                 hasSeenOnboarding = true
                 if !codex.isConnected,
                    !codex.isConnecting,
-                   let simulatorPayload = simulatorPairingPayloadFromClipboard() {
-                    simDebugLog("found pairing payload for session \(simulatorPayload.sessionId)")
+                   let simulatorProbe = simulatorPairingPayloadProbe(),
+                   case .success(let simulatorPayload, let source) = simulatorProbe {
+                    simDebugLog("found pairing payload from \(source.rawValue) for session \(simulatorPayload.sessionId)")
                     await viewModel.connectToRelay(
                         pairingPayload: simulatorPayload,
                         codex: codex
                     )
                 } else {
-                    simDebugLog("no valid simulator pairing payload on launch")
+                    logSimulatorPairingProbeFailureIfNeeded()
                 }
                 #endif
                 await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
@@ -389,20 +390,29 @@ struct ContentView: View {
         }
     }
 
-    private func simulatorPairingPayloadFromClipboard() -> CodexPairingQRPayload? {
+    private func simulatorPairingPayloadProbe() -> SimulatorPairingPayloadProbeResult? {
         #if targetEnvironment(simulator)
-        let environment = ProcessInfo.processInfo.environment
-        let rawValue = environment["REMODEX_SIM_PAIRING_PAYLOAD"]
-            ?? UIPasteboard.general.string
-
-        guard let rawValue,
-              let payload = try? CodexPairingQRPayload.parse(from: rawValue) else {
-            return nil
-        }
-
-        return payload
+        probeSimulatorPairingPayload(
+            environment: ProcessInfo.processInfo.environment,
+            pasteboardString: UIPasteboard.general.string
+        )
         #else
         return nil
+        #endif
+    }
+
+    private func logSimulatorPairingProbeFailureIfNeeded() {
+        #if targetEnvironment(simulator)
+        switch simulatorPairingPayloadProbe() {
+        case .none, .missing:
+            simDebugLog("no valid simulator pairing payload on launch")
+        case .failure(let failure):
+            simDebugLog(
+                "simulator pairing payload invalid from \(failure.source.rawValue): \(failure.message); raw=\(failure.rawPreview)"
+            )
+        case .success:
+            break
+        }
         #endif
     }
 
@@ -485,6 +495,64 @@ struct ContentView: View {
             selectedThread = first
         }
     }
+}
+
+enum SimulatorPairingPayloadSource: String, Equatable {
+    case environment
+    case pasteboard
+}
+
+struct SimulatorPairingPayloadFailure: Equatable {
+    let source: SimulatorPairingPayloadSource
+    let message: String
+    let rawPreview: String
+}
+
+enum SimulatorPairingPayloadProbeResult {
+    case missing
+    case success(CodexPairingQRPayload, SimulatorPairingPayloadSource)
+    case failure(SimulatorPairingPayloadFailure)
+}
+
+func probeSimulatorPairingPayload(
+    environment: [String: String],
+    pasteboardString: String?
+) -> SimulatorPairingPayloadProbeResult {
+    if let rawValue = environment["REMODEX_SIM_PAIRING_PAYLOAD"] {
+        return parseSimulatorPairingPayload(rawValue, source: .environment)
+    }
+
+    if let pasteboardString, !pasteboardString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return parseSimulatorPairingPayload(pasteboardString, source: .pasteboard)
+    }
+
+    return .missing
+}
+
+private func parseSimulatorPairingPayload(
+    _ rawValue: String,
+    source: SimulatorPairingPayloadSource
+) -> SimulatorPairingPayloadProbeResult {
+    do {
+        return .success(try CodexPairingQRPayload.parse(from: rawValue), source)
+    } catch {
+        return .failure(
+            SimulatorPairingPayloadFailure(
+                source: source,
+                message: error.localizedDescription,
+                rawPreview: simulatorPairingRawPreview(rawValue)
+            )
+        )
+    }
+}
+
+private func simulatorPairingRawPreview(_ rawValue: String) -> String {
+    let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.count <= 120 {
+        return trimmed
+    }
+
+    return "\(trimmed.prefix(120))..."
 }
 
 private struct TwoLineHamburgerIcon: View {

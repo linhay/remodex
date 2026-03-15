@@ -458,8 +458,9 @@ extension CodexService {
         var allThreads: [CodexThread] = []
         var nextCursor: JSONValue = .null
         var hasRequestedFirstPage = false
+        var seenPaginationCursors: Set<JSONValue> = []
 
-        repeat {
+        while true {
             var params: RPCObject = [
                 // Avoid the server's narrower default sourceKinds so multi-project history
                 // includes threads started from the app-server flow as well.
@@ -490,11 +491,22 @@ extension CodexService {
             allThreads.append(contentsOf: page.compactMap { decodeModel(CodexThread.self, from: $0) })
             nextCursor = nextThreadListCursor(from: resultObject)
             hasRequestedFirstPage = true
-        } while shouldContinueThreadListPagination(
-            nextCursor: nextCursor,
-            limit: limit,
-            hasRequestedFirstPage: hasRequestedFirstPage
-        )
+
+            let shouldContinue = shouldContinueThreadListPagination(
+                nextCursor: nextCursor,
+                limit: limit,
+                hasRequestedFirstPage: hasRequestedFirstPage
+            )
+            guard shouldContinue else {
+                break
+            }
+
+            if seenPaginationCursors.contains(nextCursor) {
+                debugSyncLog("thread/list pagination stopped: repeated cursor \(nextCursor)")
+                break
+            }
+            seenPaginationCursors.insert(nextCursor)
+        }
 
         return allThreads
     }

@@ -29,23 +29,26 @@ const HANDSHAKE_MODE_QR_BOOTSTRAP = "qr_bootstrap";
 const HANDSHAKE_MODE_TRUSTED_RECONNECT = "trusted_reconnect";
 const SECURE_SENDER_MAC = "mac";
 const SECURE_SENDER_IPHONE = "iphone";
-const MAX_PAIRING_AGE_MS = 5 * 60 * 1000;
+const DEFAULT_PAIRING_AGE_MS = 30 * 60 * 1000;
+// Maximum valid JS Date timestamp so qr.js can always print ISO expiry.
+const NEVER_EXPIRES_TIMESTAMP_MS = 8_640_000_000_000_000;
 const MAX_BRIDGE_OUTBOUND_MESSAGES = 500;
 const MAX_BRIDGE_OUTBOUND_BYTES = 10 * 1024 * 1024;
 
 function createBridgeSecureTransport({ sessionId, relayUrl, relayAuthKey = "", deviceState }) {
+  const pairingExpiryConfig = resolvePairingExpiryConfig(process.env);
   let currentDeviceState = deviceState;
   let pendingHandshake = null;
   let activeSession = null;
   let liveSendWireMessage = null;
-  let currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
+  let currentPairingExpiresAt = computePairingExpiresAt(pairingExpiryConfig);
   let nextKeyEpoch = 1;
   let nextBridgeOutboundSeq = 1;
   let outboundBufferBytes = 0;
   const outboundBuffer = [];
 
   function createPairingPayload() {
-    currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
+    currentPairingExpiresAt = computePairingExpiresAt(pairingExpiryConfig);
     return {
       v: PAIRING_QR_VERSION,
       relay: relayUrl,
@@ -704,6 +707,31 @@ function base64UrlToBase64(value) {
 
 function base64ToBase64Url(value) {
   return value.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function resolvePairingExpiryConfig(env) {
+  const raw = normalizeNonEmptyString(env?.REMODEX_PAIRING_TTL_MS).toLowerCase();
+  if (!raw) {
+    return { neverExpires: false, ttlMs: DEFAULT_PAIRING_AGE_MS };
+  }
+
+  if (raw === "never") {
+    return { neverExpires: true, ttlMs: 0 };
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return { neverExpires: false, ttlMs: DEFAULT_PAIRING_AGE_MS };
+  }
+
+  return { neverExpires: false, ttlMs: parsed };
+}
+
+function computePairingExpiresAt(config) {
+  if (config.neverExpires) {
+    return NEVER_EXPIRES_TIMESTAMP_MS;
+  }
+  return Date.now() + config.ttlMs;
 }
 
 module.exports = {

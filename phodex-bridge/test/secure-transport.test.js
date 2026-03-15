@@ -24,6 +24,102 @@ const {
   nonceForDirection,
 } = require("../src/secure-transport");
 
+test("pairing payload honors REMODEX_PAIRING_TTL_MS", () => {
+  const previousTTL = process.env.REMODEX_PAIRING_TTL_MS;
+  process.env.REMODEX_PAIRING_TTL_MS = "3600000";
+
+  try {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const privateJwk = privateKey.export({ format: "jwk" });
+    const publicJwk = publicKey.export({ format: "jwk" });
+    const secureTransport = createBridgeSecureTransport({
+      sessionId: "session-ttl-custom",
+      relayUrl: "wss://relay.example/relay",
+      deviceState: {
+        macDeviceId: "mac-ttl-custom",
+        macIdentityPrivateKey: base64UrlToBase64(privateJwk.d),
+        macIdentityPublicKey: base64UrlToBase64(publicJwk.x),
+        trustedPhones: {},
+      },
+    });
+
+    const now = Date.now();
+    const payload = secureTransport.createPairingPayload();
+    const delta = payload.expiresAt - now;
+    assert.ok(delta >= 59 * 60 * 1000, `expected >= 59m, got ${delta}`);
+    assert.ok(delta <= 61 * 60 * 1000, `expected <= 61m, got ${delta}`);
+  } finally {
+    if (previousTTL == null) {
+      delete process.env.REMODEX_PAIRING_TTL_MS;
+    } else {
+      process.env.REMODEX_PAIRING_TTL_MS = previousTTL;
+    }
+  }
+});
+
+test("pairing payload falls back to default TTL when REMODEX_PAIRING_TTL_MS is invalid", () => {
+  const previousTTL = process.env.REMODEX_PAIRING_TTL_MS;
+  process.env.REMODEX_PAIRING_TTL_MS = "invalid";
+
+  try {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const privateJwk = privateKey.export({ format: "jwk" });
+    const publicJwk = publicKey.export({ format: "jwk" });
+    const secureTransport = createBridgeSecureTransport({
+      sessionId: "session-ttl-default",
+      relayUrl: "wss://relay.example/relay",
+      deviceState: {
+        macDeviceId: "mac-ttl-default",
+        macIdentityPrivateKey: base64UrlToBase64(privateJwk.d),
+        macIdentityPublicKey: base64UrlToBase64(publicJwk.x),
+        trustedPhones: {},
+      },
+    });
+
+    const now = Date.now();
+    const payload = secureTransport.createPairingPayload();
+    const delta = payload.expiresAt - now;
+    assert.ok(delta >= 29 * 60 * 1000, `expected >= 29m, got ${delta}`);
+    assert.ok(delta <= 31 * 60 * 1000, `expected <= 31m, got ${delta}`);
+  } finally {
+    if (previousTTL == null) {
+      delete process.env.REMODEX_PAIRING_TTL_MS;
+    } else {
+      process.env.REMODEX_PAIRING_TTL_MS = previousTTL;
+    }
+  }
+});
+
+test("pairing payload supports non-expiring mode when REMODEX_PAIRING_TTL_MS=never", () => {
+  const previousTTL = process.env.REMODEX_PAIRING_TTL_MS;
+  process.env.REMODEX_PAIRING_TTL_MS = "never";
+
+  try {
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const privateJwk = privateKey.export({ format: "jwk" });
+    const publicJwk = publicKey.export({ format: "jwk" });
+    const secureTransport = createBridgeSecureTransport({
+      sessionId: "session-ttl-never",
+      relayUrl: "wss://relay.example/relay",
+      deviceState: {
+        macDeviceId: "mac-ttl-never",
+        macIdentityPrivateKey: base64UrlToBase64(privateJwk.d),
+        macIdentityPublicKey: base64UrlToBase64(publicJwk.x),
+        trustedPhones: {},
+      },
+    });
+
+    const payload = secureTransport.createPairingPayload();
+    assert.equal(payload.expiresAt, 8_640_000_000_000_000);
+  } finally {
+    if (previousTTL == null) {
+      delete process.env.REMODEX_PAIRING_TTL_MS;
+    } else {
+      process.env.REMODEX_PAIRING_TTL_MS = previousTTL;
+    }
+  }
+});
+
 test("secure transport rejects plaintext JSON-RPC before the secure handshake", () => {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const privateJwk = privateKey.export({ format: "jwk" });

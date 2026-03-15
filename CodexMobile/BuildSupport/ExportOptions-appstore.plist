@@ -9,7 +9,7 @@
 	<key>provisioningProfiles</key>
 	<dict>
 		<key>com.linhay.redmix</key>
-		<string>Remodex App Store v2</string>
+		<string>Redmix AppStore 20260315</string>
 	</dict>
 	<key>signingCertificate</key>
 	<string>Apple Distribution</string>

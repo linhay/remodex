@@ -174,6 +174,57 @@ final class CodexSkillsListDecodeTests: XCTestCase {
         XCTAssertEqual(Set(service.threads.filter { $0.syncState == .archivedLocal }.map(\.id)), Set(["archived-1", "archived-2"]))
     }
 
+    func testFetchServerThreadsStopsPaginationWhenCursorRepeats() async throws {
+        let service = makeService()
+        var capturedParams: [RPCObject] = []
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "thread/list")
+            let object = params?.objectValue ?? [:]
+            capturedParams.append(object)
+
+            switch capturedParams.count {
+            case 1:
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "data": .array([
+                            self.makeThreadJSON(id: "loop-1", cwd: "/Users/me/work/app"),
+                        ]),
+                        "nextCursor": .string("loop-cursor"),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case 2:
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "data": .array([
+                            self.makeThreadJSON(id: "loop-2", cwd: "/Users/me/work/site"),
+                        ]),
+                        "nextCursor": .string("loop-cursor"),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected extra thread/list request when cursor repeats: \(object)")
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "data": .array([]),
+                        "nextCursor": .null,
+                    ]),
+                    includeJSONRPC: false
+                )
+            }
+        }
+
+        let threads = try await service.fetchServerThreads()
+
+        XCTAssertEqual(capturedParams.count, 2)
+        XCTAssertEqual(threads.map(\.id), ["loop-1", "loop-2"])
+    }
+
     func testDecodeSkillsListParsesBucketedDataShape() {
         let service = makeService()
         let result: JSONValue = .object([

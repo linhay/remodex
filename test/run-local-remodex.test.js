@@ -25,6 +25,8 @@ function runScriptWithEnv(args, envOverrides) {
       ...process.env,
       REMODEX_RELAY_KEY: "test-key",
       REMODEX_PUBLIC_RELAY_URL: "",
+      REMODEX_CLOUDFLARED_TOKEN_FILE: "",
+      REMODEX_RELAY_BIND_HOST: "",
       REMODEX_ENV_FILE: "/tmp/remodex-test-missing.env",
       ...envOverrides,
     },

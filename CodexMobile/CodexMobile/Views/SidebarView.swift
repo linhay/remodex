@@ -23,10 +23,13 @@ struct SidebarView: View {
     @State private var projectGroupPendingArchive: SidebarThreadGroup? = nil
     @State private var threadPendingDeletion: CodexThread? = nil
     @State private var createThreadErrorMessage: String? = nil
+    @State private var groupingRebuildDebouncer = SidebarGroupingRebuildDebouncer()
+    @State private var runBadgeStateByThreadID: [String: CodexThreadRunBadgeState] = [:]
+    @State private var sidebarDiffTotalsByThreadID: [String: TurnSessionDiffTotals] = [:]
+    @State private var sidebarMetricHydrationTask: Task<Void, Never>?
+    @State private var sidebarMetricRevision = 0
 
     var body: some View {
-        let diffTotalsByThreadID = sidebarDiffTotalsByThreadID
-
         VStack(alignment: .leading, spacing: 0) {
             SidebarHeaderView()
 
@@ -53,7 +56,7 @@ struct SidebarView: View {
                 selectedThread: selectedThread,
                 bottomContentInset: 0,
                 timingLabelProvider: { SidebarRelativeTimeFormatter.compactLabel(for: $0) },
-                diffTotalsByThreadID: diffTotalsByThreadID,
+                diffTotalsByThreadID: sidebarDiffTotalsByThreadID,
                 runBadgeStateByThreadID: runBadgeStateByThreadID,
                 onSelectThread: selectThread,
                 onCreateThreadInProjectGroup: { group in
@@ -98,10 +101,15 @@ struct SidebarView: View {
             }
         }
         .onChange(of: codex.threads) { _, _ in
-            rebuildGroupedThreads()
+            scheduleGroupedThreadsRebuild()
         }
         .onChange(of: searchText) { _, _ in
-            rebuildGroupedThreads()
+            scheduleGroupedThreadsRebuild()
+        }
+        .onDisappear {
+            groupingRebuildDebouncer.cancel()
+            sidebarMetricHydrationTask?.cancel()
+            sidebarMetricHydrationTask = nil
         }
         .overlay {
             if codex.isLoadingThreads {
@@ -271,32 +279,76 @@ struct SidebarView: View {
             }
         }
         groupedThreads = SidebarThreadGrouping.makeGroups(from: source)
+        refreshSidebarThreadMetrics()
     }
 
-    private var runBadgeStateByThreadID: [String: CodexThreadRunBadgeState] {
-        var byThreadID: [String: CodexThreadRunBadgeState] = [:]
-        for thread in codex.threads {
-            if let state = codex.threadRunBadgeState(for: thread.id) {
-                byThreadID[thread.id] = state
-            }
+    private func scheduleGroupedThreadsRebuild() {
+        groupingRebuildDebouncer.schedule {
+            rebuildGroupedThreads()
         }
-        return byThreadID
     }
 
-    private var sidebarDiffTotalsByThreadID: [String: TurnSessionDiffTotals] {
-        var byThreadID: [String: TurnSessionDiffTotals] = [:]
+    // Computes visible-thread metrics first, then hydrates off-screen rows shortly after to smooth first paint.
+    private func refreshSidebarThreadMetrics() {
+        sidebarMetricHydrationTask?.cancel()
+        sidebarMetricRevision += 1
+        let revision = sidebarMetricRevision
 
-        for thread in codex.threads {
-            let messages = codex.messages(for: thread.id)
-            if let totals = TurnSessionDiffSummaryCalculator.totals(
-                from: messages,
-                scope: .unpushedSession
-            ) {
-                byThreadID[thread.id] = totals
+        let visibleThreadIDs = SidebarThreadMetricStaging.visibleThreadIDs(from: groupedThreads)
+        let partition = SidebarThreadMetricStaging.partitionThreadIDs(from: codex.threads, visibleThreadIDs: visibleThreadIDs)
+
+        var visibleRunBadgeByThreadID: [String: CodexThreadRunBadgeState] = [:]
+        var visibleDiffTotalsByThreadID: [String: TurnSessionDiffTotals] = [:]
+
+        for threadID in partition.visible {
+            if let state = codex.threadRunBadgeState(for: threadID) {
+                visibleRunBadgeByThreadID[threadID] = state
+            }
+            if let totals = diffTotals(for: threadID) {
+                visibleDiffTotalsByThreadID[threadID] = totals
             }
         }
 
-        return byThreadID
+        runBadgeStateByThreadID = visibleRunBadgeByThreadID
+        sidebarDiffTotalsByThreadID = visibleDiffTotalsByThreadID
+
+        guard !partition.deferred.isEmpty else {
+            return
+        }
+
+        sidebarMetricHydrationTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard !Task.isCancelled, revision == sidebarMetricRevision else {
+                return
+            }
+
+            var hydratedRunBadgeByThreadID = runBadgeStateByThreadID
+            var hydratedDiffTotalsByThreadID = sidebarDiffTotalsByThreadID
+
+            for threadID in partition.deferred {
+                if let state = codex.threadRunBadgeState(for: threadID) {
+                    hydratedRunBadgeByThreadID[threadID] = state
+                }
+                if let totals = diffTotals(for: threadID) {
+                    hydratedDiffTotalsByThreadID[threadID] = totals
+                }
+            }
+
+            guard !Task.isCancelled, revision == sidebarMetricRevision else {
+                return
+            }
+
+            runBadgeStateByThreadID = hydratedRunBadgeByThreadID
+            sidebarDiffTotalsByThreadID = hydratedDiffTotalsByThreadID
+        }
+    }
+
+    private func diffTotals(for threadID: String) -> TurnSessionDiffTotals? {
+        let messages = codex.messages(for: threadID)
+        return TurnSessionDiffSummaryCalculator.totals(
+            from: messages,
+            scope: .unpushedSession
+        )
     }
 
     // Keeps the chooser in sync with the same project buckets shown in the sidebar.

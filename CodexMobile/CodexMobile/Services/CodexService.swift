@@ -87,6 +87,23 @@ enum CodexConnectionPhase: Equatable, Sendable {
     case connected
 }
 
+enum CodexRelaySourcePreference: String, CaseIterable, Equatable, Sendable {
+    case auto
+    case lanFirst
+    case publicFirst
+
+    var displayName: String {
+        switch self {
+        case .auto:
+            return "Auto"
+        case .lanFirst:
+            return "LAN first"
+        case .publicFirst:
+            return "Public first"
+        }
+    }
+}
+
 enum CodexPendingThreadComposerAction: Equatable, Sendable {
     case codeReview(target: CodexPendingCodeReviewTarget)
 }
@@ -200,6 +217,7 @@ final class CodexService {
     var selectedReasoningEffort: String?
     var selectedServiceTier: CodexServiceTier?
     var selectedAccessMode: CodexAccessMode = .onRequest
+    var selectedRelaySourcePreference: CodexRelaySourcePreference = .auto
     var isLoadingModels = false
     var modelsErrorMessage: String?
     var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
@@ -303,6 +321,7 @@ final class CodexService {
     static let selectedReasoningEffortDefaultsKey = "codex.selectedReasoningEffort"
     static let selectedServiceTierDefaultsKey = "codex.selectedServiceTier"
     static let selectedAccessModeDefaultsKey = "codex.selectedAccessMode"
+    static let selectedRelaySourcePreferenceDefaultsKey = "codex.selectedRelaySourcePreference"
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
 
@@ -366,6 +385,13 @@ final class CodexService {
             self.selectedAccessMode = parsedAccessMode
         } else {
             self.selectedAccessMode = .onRequest
+        }
+
+        if let savedRelaySourcePreference = defaults.string(forKey: Self.selectedRelaySourcePreferenceDefaultsKey),
+           let parsedRelaySourcePreference = CodexRelaySourcePreference(rawValue: savedRelaySourcePreference) {
+            self.selectedRelaySourcePreference = parsedRelaySourcePreference
+        } else {
+            self.selectedRelaySourcePreference = .auto
         }
 
         // Restore relay session from Keychain

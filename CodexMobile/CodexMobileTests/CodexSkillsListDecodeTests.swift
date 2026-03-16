@@ -418,6 +418,44 @@ final class CodexSkillsListDecodeTests: XCTestCase {
         XCTAssertEqual(skills?.first?.scope, "global")
     }
 
+    func testPrioritizeRelayBaseURLsPrefersLANWhenRelaySourceIsLANFirst() async {
+        let viewModel = ContentViewModel()
+        viewModel.relayHealthProbeOverride = { _ in false }
+
+        let ordered = await viewModel.prioritizeRelayBaseURLs(
+            ["wss://relay.example.com/relay", "ws://linhey.local:8788/relay"],
+            sourcePreference: .lanFirst
+        )
+
+        XCTAssertEqual(ordered, ["ws://linhey.local:8788/relay", "wss://relay.example.com/relay"])
+    }
+
+    func testPrioritizeRelayBaseURLsPrefersPublicWhenRelaySourceIsPublicFirst() async {
+        let viewModel = ContentViewModel()
+        viewModel.relayHealthProbeOverride = { _ in true }
+
+        let ordered = await viewModel.prioritizeRelayBaseURLs(
+            ["ws://linhey.local:8788/relay", "wss://relay.example.com/relay"],
+            sourcePreference: .publicFirst
+        )
+
+        XCTAssertEqual(ordered, ["wss://relay.example.com/relay", "ws://linhey.local:8788/relay"])
+    }
+
+    func testPrioritizeRelayBaseURLsAutoPrefersHealthyLANRelay() async {
+        let viewModel = ContentViewModel()
+        viewModel.relayHealthProbeOverride = { baseURL in
+            baseURL == "ws://linhey.local:8788/relay"
+        }
+
+        let ordered = await viewModel.prioritizeRelayBaseURLs(
+            ["wss://relay.example.com/relay", "ws://linhey.local:8788/relay"],
+            sourcePreference: .auto
+        )
+
+        XCTAssertEqual(ordered, ["ws://linhey.local:8788/relay", "wss://relay.example.com/relay"])
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "CodexSkillsListDecodeTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard

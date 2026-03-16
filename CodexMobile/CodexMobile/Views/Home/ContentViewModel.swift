@@ -14,6 +14,7 @@ final class ContentViewModel {
     private var lastSidebarOpenSyncAt: Date = .distantPast
     private let autoReconnectBackoffNanoseconds: [UInt64] = [1_000_000_000, 3_000_000_000]
     private(set) var isRunningAutoReconnect = false
+    var relayHealthProbeOverride: ((String) async -> Bool)?
 
     var isAttemptingAutoReconnect: Bool {
         isRunningAutoReconnect
@@ -286,26 +287,49 @@ extension ContentViewModel {
         guard let sessionId = codex.normalizedRelaySessionId else {
             return []
         }
-        let prioritizedRelayBases = await prioritizeRelayBaseURLs(codex.normalizedRelayBaseURLsForReconnect)
+        let prioritizedRelayBases = await prioritizeRelayBaseURLs(
+            codex.normalizedRelayBaseURLsForReconnect,
+            sourcePreference: codex.selectedRelaySourcePreference
+        )
         return prioritizedRelayBases.map { "\($0)/\(sessionId)" }
     }
 
     // Prefers LAN relays only when they look reachable, otherwise keeps public relays first.
-    func prioritizeRelayBaseURLs(_ relayBaseURLs: [String]) async -> [String] {
+    func prioritizeRelayBaseURLs(
+        _ relayBaseURLs: [String],
+        sourcePreference: CodexRelaySourcePreference
+    ) async -> [String] {
         let localURLs = relayBaseURLs.filter(isLikelyLANRelayURL)
         guard !localURLs.isEmpty else {
             return relayBaseURLs
         }
 
+        let remoteURLs = relayBaseURLs.filter { !isLikelyLANRelayURL($0) }
+
+        switch sourcePreference {
+        case .lanFirst:
+            return localURLs + remoteURLs
+        case .publicFirst:
+            return remoteURLs + localURLs
+        case .auto:
+            break
+        }
+
         for localURL in localURLs {
-            if await probeRelayHealth(baseURL: localURL) {
+            if await probeRelayHealthForPrioritization(baseURL: localURL) {
                 let remaining = relayBaseURLs.filter { $0 != localURL }
                 return [localURL] + remaining
             }
         }
 
-        let remoteURLs = relayBaseURLs.filter { !isLikelyLANRelayURL($0) }
         return remoteURLs + localURLs
+    }
+
+    private func probeRelayHealthForPrioritization(baseURL: String) async -> Bool {
+        if let relayHealthProbeOverride {
+            return await relayHealthProbeOverride(baseURL)
+        }
+        return await probeRelayHealth(baseURL: baseURL)
     }
 
     func isLikelyLANRelayURL(_ value: String) -> Bool {

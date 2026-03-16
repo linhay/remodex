@@ -94,6 +94,11 @@ extension CodexService {
         persistRuntimeSelections()
     }
 
+    func setRelaySourcePreference(_ preference: CodexRelaySourcePreference) {
+        selectedRelaySourcePreference = preference
+        defaults.set(preference.rawValue, forKey: Self.selectedRelaySourcePreferenceDefaultsKey)
+    }
+
     func selectedModelOption() -> CodexModelOption? {
         selectedModelOption(from: availableModels)
     }

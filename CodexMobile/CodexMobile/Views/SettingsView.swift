@@ -113,6 +113,19 @@ struct SettingsView: View {
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
+            HStack {
+                Text("Relay Source")
+                Spacer()
+                Picker("Relay Source", selection: relaySourcePreferenceSelection) {
+                    ForEach(CodexRelaySourcePreference.allCases, id: \.rawValue) { preference in
+                        Text(preference.displayName).tag(preference)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .tint(settingsAccentColor)
+            }
+
             Text("Security: \(codex.secureConnectionState.statusLabel)")
                 .font(AppFont.caption())
                 .foregroundStyle(codex.secureConnectionState == .encrypted ? .green : .secondary)
@@ -249,6 +262,13 @@ struct SettingsView: View {
                     selection == runtimeNormalValue ? nil : CodexServiceTier(rawValue: selection)
                 )
             }
+        )
+    }
+
+    private var relaySourcePreferenceSelection: Binding<CodexRelaySourcePreference> {
+        Binding(
+            get: { codex.selectedRelaySourcePreference },
+            set: { codex.setRelaySourcePreference($0) }
         )
     }
 }

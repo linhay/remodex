@@ -48,6 +48,8 @@ function createBridgeSecureTransport({
   let pendingHandshake = null;
   let activeSession = null;
   let liveSendWireMessage = null;
+  // Highest bridge seq definitely acked by phone via resumeState.
+  let lastRelayedBridgeOutboundSeq = 0;
   let currentPairingExpiresAt = computePairingExpiresAt(pairingExpiryConfig);
   let nextKeyEpoch = 1;
   let nextBridgeOutboundSeq = 1;
@@ -119,8 +121,12 @@ function createBridgeSecureTransport({
     outboundBufferBytes += bufferEntry.sizeBytes;
     trimOutboundBuffer();
 
-    if (activeSession?.isResumed) {
-      sendBufferedEntry(bufferEntry, sendWireMessage);
+    const liveSessionSender = activeSession?.sendWireMessage;
+    const effectiveSendWireMessage = typeof liveSessionSender === "function"
+      ? liveSessionSender
+      : sendWireMessage;
+    if (activeSession?.isResumed && typeof effectiveSendWireMessage === "function") {
+      sendBufferedEntry(bufferEntry, effectiveSendWireMessage);
     }
   }
 
@@ -400,16 +406,13 @@ function createBridgeSecureTransport({
     }
 
     const lastAppliedBridgeOutboundSeq = Number(message.lastAppliedBridgeOutboundSeq) || 0;
-    const missingEntries = outboundBuffer.filter(
-      (entry) => entry.bridgeOutboundSeq > lastAppliedBridgeOutboundSeq
-    );
+    lastRelayedBridgeOutboundSeq = lastAppliedBridgeOutboundSeq;
+    const missingEntries = replayableOutboundEntries(lastAppliedBridgeOutboundSeq);
     activeSession.isResumed = true;
     for (const entry of missingEntries) {
-      sendBufferedEntry(entry, messageText => {
-        if (typeof activeSession.sendWireMessage === "function") {
-          activeSession.sendWireMessage(messageText);
-        }
-      });
+      if (!sendBufferedEntry(entry, activeSession.sendWireMessage)) {
+        break;
+      }
     }
   }
 
@@ -468,6 +471,7 @@ function createBridgeSecureTransport({
     liveSendWireMessage = sendWireMessage;
     if (activeSession) {
       activeSession.sendWireMessage = sendWireMessage;
+      replayBufferedOutboundMessages();
     }
   }
 
@@ -488,12 +492,13 @@ function createBridgeSecureTransport({
   function resetOutboundReplayState() {
     outboundBuffer.length = 0;
     outboundBufferBytes = 0;
+    lastRelayedBridgeOutboundSeq = 0;
     nextBridgeOutboundSeq = 1;
   }
 
   function sendBufferedEntry(entry, sendWireMessage) {
-    if (!activeSession?.isResumed) {
-      return;
+    if (!activeSession?.isResumed || typeof sendWireMessage !== "function") {
+      return false;
     }
 
     const envelope = encryptEnvelopePayload(
@@ -508,7 +513,25 @@ function createBridgeSecureTransport({
       activeSession.keyEpoch
     );
     activeSession.nextOutboundCounter += 1;
-    sendWireMessage(JSON.stringify(envelope));
+    return sendWireMessage(JSON.stringify(envelope)) !== false;
+  }
+
+  function replayableOutboundEntries(lastAppliedBridgeOutboundSeq) {
+    return outboundBuffer.filter(
+      (entry) => entry.bridgeOutboundSeq > lastAppliedBridgeOutboundSeq
+    );
+  }
+
+  function replayBufferedOutboundMessages() {
+    if (!activeSession?.isResumed || typeof activeSession.sendWireMessage !== "function") {
+      return;
+    }
+
+    for (const entry of replayableOutboundEntries(lastRelayedBridgeOutboundSeq)) {
+      if (!sendBufferedEntry(entry, activeSession.sendWireMessage)) {
+        break;
+      }
+    }
   }
 
   return {

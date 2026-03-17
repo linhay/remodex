@@ -7,6 +7,9 @@
 import Foundation
 import Network
 
+// Keep encrypted relay envelopes under one explicit ceiling across iPhone websocket APIs.
+private let codexWebSocketMaximumMessageSizeBytes = 4 * 1024 * 1024
+
 extension CodexService {
     // Sends an RPC request and waits for the matching response by request id.
     func sendRequest(method: String, params: JSONValue?) async throws -> RPCMessage {
@@ -159,6 +162,8 @@ extension CodexService {
 
         let webSocketOptions = NWProtocolWebSocket.Options()
         webSocketOptions.autoReplyPing = true
+        // Network.framework default can reject larger encrypted envelopes.
+        webSocketOptions.maximumMessageSize = codexWebSocketMaximumMessageSizeBytes
 
         if let role, !role.isEmpty {
             var headers: [(name: String, value: String)] = [

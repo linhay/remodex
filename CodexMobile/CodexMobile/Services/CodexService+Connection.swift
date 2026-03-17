@@ -298,7 +298,7 @@ extension CodexService {
         }
         if let threadId = activeThreadId
             ?? resolvedPreferredThreadId
-            ?? threads.first(where: { $0.syncState == .live })?.id {
+            ?? firstLiveThreadID() {
             await refreshInFlightTurnState(threadId: threadId)
             if threadHasActiveOrRunningTurn(threadId) {
                 _ = try? await ensureThreadResumed(threadId: threadId, force: true)
@@ -436,6 +436,8 @@ extension CodexService {
             switch nwError {
             case .posix(let code) where code == .ECONNREFUSED:
                 return "Connection refused by relay server at \(attemptedURL)."
+            case .posix(let code) where code == .ENETDOWN || code == .ENETUNREACH || code == .EHOSTUNREACH:
+                return "Cannot reach relay server at \(attemptedURL). Check that the iPhone can access the Mac on the local network."
             case .posix(let code) where code == .ETIMEDOUT:
                 return "Connection timed out. Check server/network."
             case .dns(let code):

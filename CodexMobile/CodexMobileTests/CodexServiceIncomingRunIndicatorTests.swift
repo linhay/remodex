@@ -489,6 +489,31 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         }
     }
 
+    func testPermanentRelayAuthCloseKeepsSavedPairingAndDisablesReconnect() {
+        let service = makeService()
+
+        withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test") {
+            service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
+            service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
+            service.isConnected = true
+            service.isInitialized = true
+
+            service.handleReceiveError(
+                CodexServiceError.disconnected,
+                relayCloseCode: .privateCode(4004)
+            )
+
+            XCTAssertFalse(service.isConnected)
+            XCTAssertFalse(service.shouldAutoReconnectOnForeground)
+            XCTAssertNotNil(service.relaySessionId)
+            XCTAssertNotNil(service.relayUrl)
+            XCTAssertEqual(
+                service.lastErrorMessage,
+                "Relay authentication failed. Update the relay key on both the Mac bridge and this app, then tap Retry."
+            )
+        }
+    }
+
     func testSavedRelaySessionRequiresBothSessionIdAndRelayURL() {
         let service = makeService()
 

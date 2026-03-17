@@ -10,6 +10,7 @@ import UIKit
 
 extension CodexService {
     private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4002, 4003, 4004]
+    private static let permanentRelayCloseCodesThatKeepSavedPairing: Set<UInt16> = [4004]
 
     // Opens the WebSocket and performs initialize/initialized handshake.
     func connect(
@@ -213,7 +214,7 @@ extension CodexService {
         let permanentRelayMessage = permanentRelayDisconnectMessage(for: relayCloseCode)
         let isBenignDisconnect = isBenignBackgroundDisconnect(error)
         let shouldSuppressMessage = isBenignDisconnect && (!isAppInForeground || !appIsActive)
-        let shouldClearSavedRelaySession = permanentRelayMessage != nil
+        let shouldClearSavedRelaySession = shouldClearSavedRelaySession(for: relayCloseCode)
         // Foreground relay drops should reconnect too, otherwise Stop disappears mid-run.
         let shouldAttemptAutoRecovery = !shouldClearSavedRelaySession
             && (isRecoverableTransientConnectionError(error) || isBenignDisconnect)
@@ -559,10 +560,19 @@ extension CodexService {
         case 4003:
             return "This device was replaced by a newer connection. Scan a new QR code to reconnect."
         case 4004:
-            return "Relay authentication failed. Update the relay key on both the Mac bridge and this app, then reconnect."
+            return "Relay authentication failed. Update the relay key on both the Mac bridge and this app, then tap Retry."
         default:
             return "This relay pairing is no longer valid. Scan a new QR code to reconnect."
         }
+    }
+
+    // Keeps saved pairing for selected permanent errors so users can recover via config fix + retry.
+    func shouldClearSavedRelaySession(for closeCode: NWProtocolWebSocket.CloseCode?) -> Bool {
+        guard let rawValue = relayCloseCodeRawValue(closeCode),
+              Self.permanentRelayCloseCodeRawValues.contains(rawValue) else {
+            return false
+        }
+        return !Self.permanentRelayCloseCodesThatKeepSavedPairing.contains(rawValue)
     }
 
     var isRunningOnSimulator: Bool {

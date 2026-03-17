@@ -91,6 +91,65 @@ final class CodexServiceTierTests: XCTestCase {
         XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@1.1.4")
     }
 
+    func testSetSelectedRelaySourcePreferencePersistsChoice() {
+        let service = makeService()
+
+        service.setRelaySourcePreference(.publicFirst)
+
+        XCTAssertEqual(service.selectedRelaySourcePreference, .publicFirst)
+        XCTAssertEqual(
+            service.defaults.string(forKey: CodexService.selectedRelaySourcePreferenceDefaultsKey),
+            CodexRelaySourcePreference.publicFirst.rawValue
+        )
+    }
+
+    func testSelectedRelaySourcePreferenceRestoresFromDefaults() {
+        let suiteName = "CodexServiceTierTests.RelaySourcePreference.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(CodexRelaySourcePreference.lanFirst.rawValue, forKey: CodexService.selectedRelaySourcePreferenceDefaultsKey)
+
+        let service = CodexService(defaults: defaults)
+        Self.retainedServices.append(service)
+
+        XCTAssertEqual(service.selectedRelaySourcePreference, .lanFirst)
+    }
+
+    func testSetSelectedRelayBaseURLPersistsValue() {
+        let service = makeService()
+        let source = "wss://relay-b.example.com/relay/"
+
+        let didChange = service.setSelectedRelayBaseURL(source)
+
+        XCTAssertTrue(didChange)
+        XCTAssertEqual(service.selectedRelayBaseURL, "wss://relay-b.example.com/relay")
+        XCTAssertEqual(
+            service.defaults.string(forKey: CodexService.selectedRelayBaseURLDefaultsKey),
+            "wss://relay-b.example.com/relay"
+        )
+    }
+
+    func testSetSelectedRelayBaseURLReturnsFalseWhenValueUnchanged() {
+        let service = makeService()
+        service.setSelectedRelayBaseURL("wss://relay-b.example.com/relay")
+
+        let didChange = service.setSelectedRelayBaseURL("wss://relay-b.example.com/relay/")
+
+        XCTAssertFalse(didChange)
+    }
+
+    func testSelectedRelayBaseURLRestoresFromDefaults() {
+        let suiteName = "CodexServiceTierTests.SelectedRelayBaseURL.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set("wss://relay-c.example.com/relay", forKey: CodexService.selectedRelayBaseURLDefaultsKey)
+
+        let service = CodexService(defaults: defaults)
+        Self.retainedServices.append(service)
+
+        XCTAssertEqual(service.selectedRelayBaseURL, "wss://relay-c.example.com/relay")
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "CodexServiceTierTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard

@@ -99,6 +99,22 @@ extension CodexService {
         defaults.set(preference.rawValue, forKey: Self.selectedRelaySourcePreferenceDefaultsKey)
     }
 
+    @discardableResult
+    func setSelectedRelayBaseURL(_ baseURL: String?) -> Bool {
+        let normalized = baseURL?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+        let sanitized = (normalized?.isEmpty == false) ? normalized : nil
+        let didChange = selectedRelayBaseURL != sanitized
+        selectedRelayBaseURL = sanitized
+        if let sanitized {
+            defaults.set(sanitized, forKey: Self.selectedRelayBaseURLDefaultsKey)
+        } else {
+            defaults.removeObject(forKey: Self.selectedRelayBaseURLDefaultsKey)
+        }
+        return didChange
+    }
+
     func selectedModelOption() -> CodexModelOption? {
         selectedModelOption(from: availableModels)
     }

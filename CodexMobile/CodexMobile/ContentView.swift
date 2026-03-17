@@ -30,6 +30,10 @@ struct ContentView: View {
         rootContent
             // Keep launch/foreground reconnect observers alive even while the QR scanner is visible.
             .task {
+                if ProcessInfo.processInfo.arguments.contains("-CodexUITestsOpenSettings") {
+                    showSettings = true
+                }
+                seedRelayAccountsForUITestsIfNeeded()
                 #if targetEnvironment(simulator)
                 hasSeenOnboarding = true
                 if !codex.isConnected,
@@ -158,10 +162,14 @@ struct ContentView: View {
 
     @ViewBuilder
     private var rootContent: some View {
+        let bypassScannerForUITests = ProcessInfo.processInfo.arguments.contains("-CodexUITestsBypassScanner")
+
         if !hasSeenOnboarding {
             OnboardingView {
                 withAnimation { hasSeenOnboarding = true }
             }
+        } else if bypassScannerForUITests {
+            mainAppBody
         } else if isShowingManualScanner && !codex.isConnected {
             qrScannerBody
         } else if codex.isConnected || viewModel.isAttemptingAutoReconnect || shouldShowReconnectShell {
@@ -507,6 +515,46 @@ struct ContentView: View {
            let first = threads.first {
             selectedThread = first
         }
+    }
+
+    private func seedRelayAccountsForUITestsIfNeeded() {
+        guard ProcessInfo.processInfo.arguments.contains("-CodexUITestsSeedRelayAccounts"),
+              codex.relayAccountProfiles.isEmpty else {
+            return
+        }
+
+        let relayAuthKey = "uitest-auth-key"
+        let macIdentityPublicKey = Data(repeating: 7, count: 32).base64EncodedString()
+
+        let accountA = CodexPairingQRPayload(
+            v: codexPairingQRVersion,
+            relay: "wss://relay.section.trade/relay",
+            relayCandidates: [
+                "wss://relay.section.trade/relay",
+                "ws://linhey.local:8788/relay",
+            ],
+            relayAuthKey: relayAuthKey,
+            sessionId: "uitest-session-public",
+            macDeviceId: "uitest-mac-public",
+            macIdentityPublicKey: macIdentityPublicKey,
+            expiresAt: Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)
+        )
+        codex.rememberRelayPairing(accountA)
+
+        let accountB = CodexPairingQRPayload(
+            v: codexPairingQRVersion,
+            relay: "ws://linhey.local:8788/relay",
+            relayCandidates: [
+                "ws://linhey.local:8788/relay",
+                "wss://relay.section.trade/relay",
+            ],
+            relayAuthKey: relayAuthKey,
+            sessionId: "uitest-session-lan",
+            macDeviceId: "uitest-mac-lan",
+            macIdentityPublicKey: macIdentityPublicKey,
+            expiresAt: Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)
+        )
+        codex.rememberRelayPairing(accountB)
     }
 }
 

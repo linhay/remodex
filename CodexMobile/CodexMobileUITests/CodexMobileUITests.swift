@@ -46,4 +46,51 @@ final class CodexMobileUITests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(1.6))
         }
     }
+
+    func testCaptureSettingsAccountListScreenshots() throws {
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "-CodexUITestsFixture",
+            "-CodexUITestsMessageCount", "40",
+            "-CodexUITestsBypassScanner",
+        ]
+        app.launch()
+
+        let screenshotDirectory = "/Users/linhey/Desktop/Dockers/remodex/screenshots/20260317/settings"
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: screenshotDirectory),
+            withIntermediateDirectories: true
+        )
+
+        try save(
+            XCUIScreen.main.screenshot(),
+            to: "\(screenshotDirectory)/20260317-settings-account-list-before-ios-v01.png"
+        )
+        app.terminate()
+
+        let settingsApp = XCUIApplication()
+        settingsApp.launchArguments += [
+            "-CodexUITestsFixture",
+            "-CodexUITestsMessageCount", "40",
+            "-CodexUITestsBypassScanner",
+            "-CodexUITestsSeedRelayAccounts",
+            "-CodexUITestsOpenSettings",
+        ]
+        settingsApp.launch()
+
+        RunLoop.current.run(until: Date().addingTimeInterval(2))
+        settingsApp.swipeUp()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+
+        try save(
+            XCUIScreen.main.screenshot(),
+            to: "\(screenshotDirectory)/20260317-settings-account-list-after-ios-v01.png"
+        )
+        settingsApp.terminate()
+    }
+
+    private func save(_ screenshot: XCUIScreenshot, to path: String) throws {
+        let data = screenshot.pngRepresentation
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
 }

@@ -25,6 +25,7 @@ function startBridge() {
   const sessionId = uuidv4();
   const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
   const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
+  const pairingRelayBaseUrl = config.pairingRelayUrl.replace(/\/+$/, "");
   const deviceState = loadOrCreateBridgeDeviceState();
   const desktopRefresher = new CodexDesktopRefresher({
     enabled: config.refreshEnabled,
@@ -44,8 +45,8 @@ function startBridge() {
   const forwardedInitializeRequestIds = new Set();
   const secureTransport = createBridgeSecureTransport({
     sessionId,
-    relayUrl: relayBaseUrl,
-    relayCandidates: config.relayCandidates,
+    relayUrl: pairingRelayBaseUrl,
+    relayCandidates: config.pairingRelayCandidates,
     relayAuthKey: config.relayAuthKey,
     deviceState,
   });

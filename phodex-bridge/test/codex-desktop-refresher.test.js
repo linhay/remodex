@@ -49,7 +49,8 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(linuxCommandConfig.refreshEnabled, false);
   assert.equal(explicitOnConfig.refreshEnabled, true);
   assert.equal(explicitOffConfig.refreshEnabled, false);
-  assert.deepEqual(macConfig.relayCandidates, [macConfig.relayUrl]);
+  assert.equal(macConfig.pairingRelayUrl, macConfig.relayUrl);
+  assert.deepEqual(macConfig.pairingRelayCandidates, [macConfig.pairingRelayUrl]);
 });
 
 test("readBridgeConfig parses relay candidate list and deduplicates entries", () => {
@@ -61,7 +62,25 @@ test("readBridgeConfig parses relay candidate list and deduplicates entries", ()
     platform: "darwin",
   });
 
-  assert.deepEqual(config.relayCandidates, [
+  assert.deepEqual(config.pairingRelayCandidates, [
+    "wss://relay.section.trade/relay",
+    "ws://linhey.local:8788/relay",
+  ]);
+});
+
+test("readBridgeConfig supports pairing relay overrides distinct from bridge socket target", () => {
+  const config = readBridgeConfig({
+    env: {
+      REMODEX_RELAY: "ws://127.0.0.1:8788/relay",
+      REMODEX_PAIRING_RELAY: "wss://relay.section.trade/relay",
+      REMODEX_RELAY_CANDIDATES: "ws://linhey.local:8788/relay",
+    },
+    platform: "darwin",
+  });
+
+  assert.equal(config.relayUrl, "ws://127.0.0.1:8788/relay");
+  assert.equal(config.pairingRelayUrl, "wss://relay.section.trade/relay");
+  assert.deepEqual(config.pairingRelayCandidates, [
     "wss://relay.section.trade/relay",
     "ws://linhey.local:8788/relay",
   ]);

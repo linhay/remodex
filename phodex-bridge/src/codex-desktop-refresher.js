@@ -521,9 +521,14 @@ function readBridgeConfig({ env = process.env, platform = process.platform } = {
     "wss://api.phodex.app/relay",
     env
   );
-  const relayCandidates = parseRelayCandidates(
+  const pairingRelayUrl = readFirstDefinedEnv(
+    ["REMODEX_PAIRING_RELAY", "PHODEX_PAIRING_RELAY"],
+    relayUrl,
+    env
+  );
+  const pairingRelayCandidates = parseRelayCandidates(
     readFirstDefinedEnv(["REMODEX_RELAY_CANDIDATES", "PHODEX_RELAY_CANDIDATES"], "", env),
-    relayUrl
+    pairingRelayUrl
   );
   const codexEndpoint = readFirstDefinedEnv(
     ["REMODEX_CODEX_ENDPOINT", "PHODEX_CODEX_ENDPOINT"],
@@ -539,8 +544,11 @@ function readBridgeConfig({ env = process.env, platform = process.platform } = {
   // Desktop refresh is opt-in for now because Codex.app still lacks true live updates.
   const defaultRefreshEnabled = false;
   return {
+    // Where the Mac bridge connects as the "mac" WebSocket client.
     relayUrl,
-    relayCandidates,
+    // What is encoded into the QR/pairing payload for the iPhone to choose from.
+    pairingRelayUrl,
+    pairingRelayCandidates,
     relayAuthKey: readFirstDefinedEnv(
       ["REMODEX_RELAY_KEY", "PHODEX_RELAY_KEY"],
       "",

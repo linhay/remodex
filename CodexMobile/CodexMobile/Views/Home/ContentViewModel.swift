@@ -7,14 +7,25 @@
 import Foundation
 import Observation
 
+struct RelayHealthProbeResult: Equatable, Sendable {
+    let isReachable: Bool
+    let latencyMs: Int?
+
+    static let unreachable = RelayHealthProbeResult(isReachable: false, latencyMs: nil)
+}
+
 @MainActor
 @Observable
 final class ContentViewModel {
     private var hasAttemptedInitialAutoConnect = false
     private var lastSidebarOpenSyncAt: Date = .distantPast
     private let autoReconnectBackoffNanoseconds: [UInt64] = [1_000_000_000, 3_000_000_000]
+    private let autoRelaySwitchIntervalNanoseconds: UInt64 = 45_000_000_000
+    private let autoRelaySwitchMinImprovementMs = 25
     private(set) var isRunningAutoReconnect = false
     var relayHealthProbeOverride: ((String) async -> Bool)?
+    var relayHealthProbeResultOverride: ((String) async -> RelayHealthProbeResult)?
+    var autoSwitchReconnectOverride: ((CodexService, [String]) async throws -> Void)?
 
     var isAttemptingAutoReconnect: Bool {
         isRunningAutoReconnect
@@ -289,16 +300,119 @@ extension ContentViewModel {
         }
         let prioritizedRelayBases = await prioritizeRelayBaseURLs(
             codex.normalizedRelayBaseURLsForReconnect,
-            sourcePreference: codex.selectedRelaySourcePreference
+            sourcePreference: codex.selectedRelaySourcePreference,
+            preferredBaseURL: codex.selectedRelayBaseURL
         )
         return prioritizedRelayBases.map { "\($0)/\(sessionId)" }
+    }
+
+    func relayAutoSwitchInterval() -> UInt64 {
+        autoRelaySwitchIntervalNanoseconds
+    }
+
+    // In Auto mode, periodically switches to a clearly lower-latency relay source.
+    func autoSwitchRelayIfNeeded(codex: CodexService) async {
+        guard codex.selectedRelayBaseURL == nil,
+              codex.selectedRelaySourcePreference == .auto,
+              codex.isConnected,
+              !codex.isConnecting,
+              !isRunningAutoReconnect,
+              let sessionId = codex.normalizedRelaySessionId else {
+            return
+        }
+
+        let sources = codex.normalizedRelayBaseURLsForReconnect
+        guard sources.count > 1 else {
+            return
+        }
+
+        let probeResults = await probeLatencyByRelaySource(sources)
+        guard let best = fastestReachableRelaySource(from: sources, probeResults: probeResults),
+              let bestLatency = probeResults[best]?.latencyMs else {
+            return
+        }
+
+        let currentBase = connectedRelayBaseURL(
+            connectedServerIdentity: codex.connectedServerIdentity,
+            sessionId: sessionId
+        )
+        guard let currentBase,
+              currentBase != best else {
+            return
+        }
+
+        let currentLatency = probeResults[currentBase]?.latencyMs
+        let shouldSwitch: Bool
+        if let currentLatency {
+            shouldSwitch = (currentLatency - bestLatency) >= autoRelaySwitchMinImprovementMs
+        } else {
+            shouldSwitch = true
+        }
+
+        guard shouldSwitch else {
+            return
+        }
+
+        let prioritized = [best] + sources.filter { $0 != best }
+        let serverURLs = prioritized.map { "\($0)/\(sessionId)" }
+
+        do {
+            codex.connectionRecoveryState = .retrying(attempt: 0, message: "Switching to lower-latency relay...")
+            if let autoSwitchReconnectOverride {
+                try await autoSwitchReconnectOverride(codex, serverURLs)
+            } else {
+                try await connectWithAutoRecovery(
+                    codex: codex,
+                    serverURLs: serverURLs,
+                    performAutoRetry: true
+                )
+            }
+            codex.relayAutoSwitchRecord = CodexRelayAutoSwitchRecord(
+                fromBaseURL: currentBase,
+                toBaseURL: best,
+                latencyMs: bestLatency,
+                previousLatencyMs: currentLatency,
+                timestamp: Date()
+            )
+        } catch {
+            // Non-fatal: next timer tick can retry.
+        }
     }
 
     // Prefers LAN relays only when they look reachable, otherwise keeps public relays first.
     func prioritizeRelayBaseURLs(
         _ relayBaseURLs: [String],
+        sourcePreference: CodexRelaySourcePreference,
+        preferredBaseURL: String? = nil
+    ) async -> [String] {
+        let orderedByPreference = await prioritizedBySourcePreference(
+            relayBaseURLs,
+            sourcePreference: sourcePreference
+        )
+
+        guard let preferredBaseURL = preferredBaseURL?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/+$", with: "", options: .regularExpression),
+              !preferredBaseURL.isEmpty,
+              orderedByPreference.contains(preferredBaseURL) else {
+            return orderedByPreference
+        }
+
+        return [preferredBaseURL] + orderedByPreference.filter { $0 != preferredBaseURL }
+    }
+
+    private func prioritizedBySourcePreference(
+        _ relayBaseURLs: [String],
         sourcePreference: CodexRelaySourcePreference
     ) async -> [String] {
+        if sourcePreference == .auto {
+            let probeResults = await probeLatencyByRelaySource(relayBaseURLs)
+            let hasReachable = relayBaseURLs.contains { probeResults[$0]?.isReachable == true }
+            if hasReachable {
+                return sortRelayBaseURLsByLatency(relayBaseURLs, probeResults: probeResults)
+            }
+        }
+
         let localURLs = relayBaseURLs.filter(isLikelyLANRelayURL)
         guard !localURLs.isEmpty else {
             return relayBaseURLs
@@ -323,6 +437,82 @@ extension ContentViewModel {
         }
 
         return remoteURLs + localURLs
+    }
+
+    func rankRelayBaseURLsByLatency(_ relayBaseURLs: [String]) async -> [String] {
+        guard !relayBaseURLs.isEmpty else {
+            return relayBaseURLs
+        }
+
+        let probeResults = await probeLatencyByRelaySource(relayBaseURLs)
+
+        let hasReachable = relayBaseURLs.contains { probeResults[$0]?.isReachable == true }
+        guard hasReachable else {
+            return relayBaseURLs
+        }
+
+        return sortRelayBaseURLsByLatency(relayBaseURLs, probeResults: probeResults)
+    }
+
+    private func sortRelayBaseURLsByLatency(
+        _ relayBaseURLs: [String],
+        probeResults: [String: RelayHealthProbeResult]
+    ) -> [String] {
+        let indexed = relayBaseURLs.enumerated().map { (offset: $0.offset, source: $0.element) }
+        let sorted = indexed.sorted { lhs, rhs in
+            let leftResult = probeResults[lhs.source] ?? .unreachable
+            let rightResult = probeResults[rhs.source] ?? .unreachable
+            if leftResult.isReachable != rightResult.isReachable {
+                return leftResult.isReachable && !rightResult.isReachable
+            }
+
+            let leftLatency = leftResult.latencyMs ?? Int.max
+            let rightLatency = rightResult.latencyMs ?? Int.max
+            if leftLatency != rightLatency {
+                return leftLatency < rightLatency
+            }
+            return lhs.offset < rhs.offset
+        }
+        return sorted.map(\.source)
+    }
+
+    private func probeLatencyByRelaySource(_ relayBaseURLs: [String]) async -> [String: RelayHealthProbeResult] {
+        var results: [String: RelayHealthProbeResult] = [:]
+        for source in relayBaseURLs {
+            results[source] = await probeRelayHealthWithLatency(baseURL: source)
+        }
+        return results
+    }
+
+    private func fastestReachableRelaySource(
+        from relayBaseURLs: [String],
+        probeResults: [String: RelayHealthProbeResult]
+    ) -> String? {
+        relayBaseURLs
+            .filter { probeResults[$0]?.isReachable == true }
+            .min { lhs, rhs in
+                let left = probeResults[lhs]?.latencyMs ?? Int.max
+                let right = probeResults[rhs]?.latencyMs ?? Int.max
+                return left < right
+            }
+    }
+
+    private func connectedRelayBaseURL(
+        connectedServerIdentity: String?,
+        sessionId: String
+    ) -> String? {
+        guard var identity = connectedServerIdentity?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !identity.isEmpty else {
+            return nil
+        }
+
+        let suffix = "/\(sessionId)"
+        if identity.hasSuffix(suffix) {
+            identity.removeLast(suffix.count)
+        }
+
+        return identity.replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
     }
 
     private func probeRelayHealthForPrioritization(baseURL: String) async -> Bool {
@@ -357,9 +547,33 @@ extension ContentViewModel {
         return false
     }
 
+    func firstLANRelayBaseURL(from relayBaseURLs: [String]) -> String? {
+        relayBaseURLs.first(where: isLikelyLANRelayURL)
+    }
+
+    func firstPublicRelayBaseURL(from relayBaseURLs: [String]) -> String? {
+        relayBaseURLs.first(where: { !isLikelyLANRelayURL($0) })
+    }
+
     func probeRelayHealth(baseURL: String) async -> Bool {
+        if let relayHealthProbeOverride {
+            return await relayHealthProbeOverride(baseURL)
+        }
+        return await probeRelayHealthWithLatency(baseURL: baseURL).isReachable
+    }
+
+    func probeRelayHealthWithLatency(baseURL: String) async -> RelayHealthProbeResult {
+        if let relayHealthProbeResultOverride {
+            return await relayHealthProbeResultOverride(baseURL)
+        }
+        if let relayHealthProbeOverride {
+            let reachable = await relayHealthProbeOverride(baseURL)
+            return reachable
+                ? RelayHealthProbeResult(isReachable: true, latencyMs: nil)
+                : .unreachable
+        }
         guard var components = URLComponents(string: baseURL) else {
-            return false
+            return .unreachable
         }
         if components.scheme == "ws" {
             components.scheme = "http"
@@ -370,19 +584,28 @@ extension ContentViewModel {
         components.query = nil
         components.fragment = nil
         guard let healthURL = components.url else {
-            return false
+            return .unreachable
         }
 
         var request = URLRequest(url: healthURL)
         request.timeoutInterval = 0.45
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
 
+        let startedAt = DispatchTime.now().uptimeNanoseconds
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             if let httpResponse = response as? HTTPURLResponse {
-                return (200...299).contains(httpResponse.statusCode)
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    return .unreachable
+                }
+                let endedAt = DispatchTime.now().uptimeNanoseconds
+                let deltaMs = Int((endedAt - startedAt) / 1_000_000)
+                return RelayHealthProbeResult(
+                    isReachable: true,
+                    latencyMs: max(1, deltaMs)
+                )
             }
         } catch {}
-        return false
+        return .unreachable
     }
 }

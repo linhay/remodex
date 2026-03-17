@@ -49,6 +49,14 @@ struct CodexThreadCompletionBanner: Identifiable, Equatable, Sendable {
     let title: String
 }
 
+struct CodexRelayAutoSwitchRecord: Equatable, Sendable {
+    let fromBaseURL: String?
+    let toBaseURL: String
+    let latencyMs: Int
+    let previousLatencyMs: Int?
+    let timestamp: Date
+}
+
 enum CodexThreadRunBadgeState: Equatable, Sendable {
     case running
     case ready
@@ -218,6 +226,7 @@ final class CodexService {
     var selectedServiceTier: CodexServiceTier?
     var selectedAccessMode: CodexAccessMode = .onRequest
     var selectedRelaySourcePreference: CodexRelaySourcePreference = .auto
+    var selectedRelayBaseURL: String?
     var isLoadingModels = false
     var modelsErrorMessage: String?
     var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
@@ -246,6 +255,7 @@ final class CodexService {
     var hasPresentedServiceTierBridgeUpdatePrompt = false
     // Mirrors the sidebar ready-dot with a tappable in-app banner when another chat finishes.
     var threadCompletionBanner: CodexThreadCompletionBanner?
+    var relayAutoSwitchRecord: CodexRelayAutoSwitchRecord?
 
     // --- Internal wiring ------------------------------------------------------
 
@@ -322,6 +332,7 @@ final class CodexService {
     static let selectedServiceTierDefaultsKey = "codex.selectedServiceTier"
     static let selectedAccessModeDefaultsKey = "codex.selectedAccessMode"
     static let selectedRelaySourcePreferenceDefaultsKey = "codex.selectedRelaySourcePreference"
+    static let selectedRelayBaseURLDefaultsKey = "codex.selectedRelayBaseURL"
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
 
@@ -393,6 +404,11 @@ final class CodexService {
         } else {
             self.selectedRelaySourcePreference = .auto
         }
+
+        let savedRelayBaseURL = defaults.string(forKey: Self.selectedRelayBaseURLDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+        self.selectedRelayBaseURL = (savedRelayBaseURL?.isEmpty == false) ? savedRelayBaseURL : nil
 
         // Restore relay session from Keychain
         self.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)

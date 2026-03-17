@@ -456,6 +456,155 @@ final class CodexSkillsListDecodeTests: XCTestCase {
         XCTAssertEqual(ordered, ["ws://linhey.local:8788/relay", "wss://relay.example.com/relay"])
     }
 
+    func testPrioritizeRelayBaseURLsAutoPrefersLowestLatencyRelay() async {
+        let viewModel = ContentViewModel()
+        viewModel.relayHealthProbeResultOverride = { baseURL in
+            switch baseURL {
+            case "wss://relay-a.example.com/relay":
+                return RelayHealthProbeResult(isReachable: true, latencyMs: 90)
+            case "ws://linhey.local:8788/relay":
+                return RelayHealthProbeResult(isReachable: true, latencyMs: 30)
+            case "wss://relay-b.example.com/relay":
+                return RelayHealthProbeResult(isReachable: true, latencyMs: 55)
+            default:
+                return .unreachable
+            }
+        }
+
+        let ordered = await viewModel.prioritizeRelayBaseURLs(
+            [
+                "wss://relay-a.example.com/relay",
+                "ws://linhey.local:8788/relay",
+                "wss://relay-b.example.com/relay",
+            ],
+            sourcePreference: .auto
+        )
+
+        XCTAssertEqual(
+            ordered,
+            [
+                "ws://linhey.local:8788/relay",
+                "wss://relay-b.example.com/relay",
+                "wss://relay-a.example.com/relay",
+            ]
+        )
+    }
+
+    func testPrioritizeRelayBaseURLsPlacesPreferredSourceFirst() async {
+        let viewModel = ContentViewModel()
+
+        let ordered = await viewModel.prioritizeRelayBaseURLs(
+            [
+                "wss://relay-a.example.com/relay",
+                "ws://linhey.local:8788/relay",
+                "wss://relay-b.example.com/relay",
+            ],
+            sourcePreference: .publicFirst,
+            preferredBaseURL: "wss://relay-b.example.com/relay"
+        )
+
+        XCTAssertEqual(
+            ordered,
+            [
+                "wss://relay-b.example.com/relay",
+                "wss://relay-a.example.com/relay",
+                "ws://linhey.local:8788/relay",
+            ]
+        )
+    }
+
+    func testRelayBaseURLMappingResolvesLANAndPublicCandidates() {
+        let viewModel = ContentViewModel()
+        let urls = [
+            "ws://linhey.local:8788/relay",
+            "wss://relay.example.com/relay",
+        ]
+
+        XCTAssertEqual(viewModel.firstLANRelayBaseURL(from: urls), "ws://linhey.local:8788/relay")
+        XCTAssertEqual(viewModel.firstPublicRelayBaseURL(from: urls), "wss://relay.example.com/relay")
+    }
+
+    func testRelayBaseURLMappingReturnsNilWhenCategoryMissing() {
+        let viewModel = ContentViewModel()
+
+        XCTAssertNil(viewModel.firstLANRelayBaseURL(from: ["wss://relay.example.com/relay"]))
+        XCTAssertNil(viewModel.firstPublicRelayBaseURL(from: ["ws://linhey.local:8788/relay"]))
+    }
+
+    func testProbeRelayHealthWithLatencyUsesOverrideForReachableResult() async {
+        let viewModel = ContentViewModel()
+        viewModel.relayHealthProbeResultOverride = { _ in
+            RelayHealthProbeResult(isReachable: true, latencyMs: 42)
+        }
+
+        let result = await viewModel.probeRelayHealthWithLatency(baseURL: "wss://relay.example.com/relay")
+
+        XCTAssertEqual(result, RelayHealthProbeResult(isReachable: true, latencyMs: 42))
+    }
+
+    func testProbeRelayHealthWithLatencyUsesOverrideForUnreachableResult() async {
+        let viewModel = ContentViewModel()
+        viewModel.relayHealthProbeResultOverride = { _ in .unreachable }
+
+        let result = await viewModel.probeRelayHealthWithLatency(baseURL: "wss://relay.example.com/relay")
+
+        XCTAssertEqual(result, .unreachable)
+    }
+
+    func testProbeRelayHealthBoolAPIFallsBackToLatencyResultReachability() async {
+        let viewModel = ContentViewModel()
+        viewModel.relayHealthProbeResultOverride = { _ in
+            RelayHealthProbeResult(isReachable: true, latencyMs: 18)
+        }
+
+        let isReachable = await viewModel.probeRelayHealth(baseURL: "wss://relay.example.com/relay")
+
+        XCTAssertTrue(isReachable)
+    }
+
+    func testAutoSwitchRelayIfNeededRecordsLatestSwitchOnSuccess() async {
+        let viewModel = ContentViewModel()
+        let service = makeService()
+        service.selectedRelaySourcePreference = .auto
+        service.selectedRelayBaseURL = nil
+        service.isConnected = true
+        service.isConnecting = false
+        service.relaySessionId = "session-1"
+        service.relayCandidates = [
+            "wss://relay-a.example.com/relay",
+            "wss://relay-b.example.com/relay",
+        ]
+        service.connectedServerIdentity = "wss://relay-a.example.com/relay/session-1"
+
+        viewModel.relayHealthProbeResultOverride = { source in
+            if source == "wss://relay-a.example.com/relay" {
+                return RelayHealthProbeResult(isReachable: true, latencyMs: 80)
+            }
+            if source == "wss://relay-b.example.com/relay" {
+                return RelayHealthProbeResult(isReachable: true, latencyMs: 20)
+            }
+            return .unreachable
+        }
+
+        var attemptedServerURLs: [String] = []
+        viewModel.autoSwitchReconnectOverride = { codex, serverURLs in
+            attemptedServerURLs = serverURLs
+            codex.isConnected = true
+            codex.connectedServerIdentity = serverURLs.first
+        }
+
+        await viewModel.autoSwitchRelayIfNeeded(codex: service)
+
+        XCTAssertEqual(
+            attemptedServerURLs.first,
+            "wss://relay-b.example.com/relay/session-1"
+        )
+        XCTAssertEqual(service.relayAutoSwitchRecord?.fromBaseURL, "wss://relay-a.example.com/relay")
+        XCTAssertEqual(service.relayAutoSwitchRecord?.toBaseURL, "wss://relay-b.example.com/relay")
+        XCTAssertEqual(service.relayAutoSwitchRecord?.latencyMs, 20)
+        XCTAssertEqual(service.relayAutoSwitchRecord?.previousLatencyMs, 80)
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "CodexSkillsListDecodeTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard

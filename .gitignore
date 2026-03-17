@@ -43,3 +43,4 @@ $TMP_PLACEHOLDER
 
 # VS Code
 .vscode/
+.artifacts

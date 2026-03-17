@@ -47,6 +47,16 @@ struct ContentView: View {
                 #endif
                 await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
             }
+            .task(id: scenePhase) {
+                guard scenePhase == .active else {
+                    return
+                }
+
+                while !Task.isCancelled, scenePhase == .active {
+                    await viewModel.autoSwitchRelayIfNeeded(codex: codex)
+                    try? await Task.sleep(nanoseconds: viewModel.relayAutoSwitchInterval())
+                }
+            }
             .onChange(of: showSettings) { _, show in
                 if ContentSettingsNavigationGate.shouldAppendSettingsRoute(
                     showSettings: show,

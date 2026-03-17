@@ -41,6 +41,10 @@ struct SettingsView: View {
     @State private var probeStateBySource: [String: RelaySourceProbeState] = [:]
     @State private var usesCellularInterface = false
     @State private var networkPathMonitor: NWPathMonitor?
+    @State private var isShowingAddAccountScanner = false
+    @State private var renamingAccountID: String?
+    @State private var pendingAccountDisplayName = ""
+    @State private var deletingAccountID: String?
 
     private var appFontStyleBinding: Binding<AppFont.Style> {
         Binding(
@@ -122,6 +126,20 @@ struct SettingsView: View {
         return false
     }
 
+    private var isRenamingAccountBinding: Binding<Bool> {
+        Binding(
+            get: { renamingAccountID != nil },
+            set: { if !$0 { renamingAccountID = nil } }
+        )
+    }
+
+    private var isDeletingAccountBinding: Binding<Bool> {
+        Binding(
+            get: { deletingAccountID != nil },
+            set: { if !$0 { deletingAccountID = nil } }
+        )
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
@@ -149,6 +167,45 @@ struct SettingsView: View {
             Task { @MainActor in
                 await refreshRelaySourceProbeStates()
             }
+        }
+        .sheet(isPresented: $isShowingAddAccountScanner) {
+            NavigationStack {
+                QRScannerView { pairingPayload in
+                    Task { @MainActor in
+                        isShowingAddAccountScanner = false
+                        await contentViewModel.connectToRelay(
+                            pairingPayload: pairingPayload,
+                            codex: codex
+                        )
+                        await refreshRelaySourceProbeStates()
+                    }
+                }
+            }
+        }
+        .alert("Rename Account", isPresented: isRenamingAccountBinding) {
+            TextField("Account name", text: $pendingAccountDisplayName)
+            Button("Save") {
+                guard let renamingAccountID else { return }
+                codex.renameRelayAccount(id: renamingAccountID, displayName: pendingAccountDisplayName)
+                self.renamingAccountID = nil
+            }
+            Button("Cancel", role: .cancel) {
+                renamingAccountID = nil
+            }
+        } message: {
+            Text("Use a clear name for this pairing profile.")
+        }
+        .confirmationDialog("Delete Account", isPresented: isDeletingAccountBinding) {
+            Button("Delete", role: .destructive) {
+                guard let deletingAccountID else { return }
+                _ = codex.deleteRelayAccount(id: deletingAccountID)
+                self.deletingAccountID = nil
+            }
+            Button("Cancel", role: .cancel) {
+                deletingAccountID = nil
+            }
+        } message: {
+            Text("This only removes the saved pairing profile.")
         }
     }
 }
@@ -227,6 +284,7 @@ private extension SettingsView {
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
+            relayAccountsSection
             relaySourceHeader
             relaySourcesList
 
@@ -301,6 +359,38 @@ private extension SettingsView {
         }
     }
 
+    @ViewBuilder var relayAccountsSection: some View {
+        HStack {
+            Text("Accounts")
+                .font(AppFont.caption(weight: .semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            relayControlButton("Add") {
+                HapticFeedback.shared.triggerImpactFeedback()
+                isShowingAddAccountScanner = true
+            }
+        }
+
+        if codex.sortedRelayAccounts.isEmpty {
+            Text("No account pairing configured.")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+        } else {
+            VStack(spacing: 8) {
+                ForEach(codex.sortedRelayAccounts) { account in
+                    relayAccountRow(account)
+                }
+            }
+        }
+
+        if let accountMessage = codex.relayAccountManagementMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !accountMessage.isEmpty {
+            Text(accountMessage)
+                .font(AppFont.caption())
+                .foregroundStyle(.red)
+        }
+    }
+
     var relaySourceHeader: some View {
         HStack {
             Text("Relay Sources")
@@ -320,6 +410,84 @@ private extension SettingsView {
                 HapticFeedback.shared.triggerImpactFeedback()
                 retryRelayConnection()
             }
+        }
+    }
+
+    func relayAccountRow(_ account: CodexRelayAccountProfile) -> some View {
+        let isCurrent = codex.activeRelayAccountID == account.id
+        let isConnectedCurrent = isCurrent && codex.isConnected
+
+        return HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(account.displayName)
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .foregroundStyle(.primary)
+                HStack(spacing: 6) {
+                    if isCurrent {
+                        sourceBadge("Current", tint: settingsAccentColor)
+                    }
+                    if isConnectedCurrent {
+                        sourceBadge("Connected", tint: .green)
+                    }
+                }
+                Text(account.relayURL)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                if let lastConnectedText = relayAccountLastConnectedText(account) {
+                    Text(lastConnectedText)
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                }
+
+                if let lastError = account.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !lastError.isEmpty {
+                    Text(lastError)
+                        .font(AppFont.caption())
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            VStack(alignment: .trailing, spacing: 8) {
+                Image(systemName: isCurrent ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isCurrent ? settingsAccentColor : .secondary)
+                    .font(.system(size: 16, weight: .semibold))
+
+                Button("Rename") {
+                    pendingAccountDisplayName = account.displayName
+                    renamingAccountID = account.id
+                }
+                .font(AppFont.caption(weight: .semibold))
+                .buttonStyle(.plain)
+                .foregroundStyle(settingsAccentColor)
+
+                if !isCurrent {
+                    Button("Delete") {
+                        deletingAccountID = account.id
+                    }
+                    .font(AppFont.caption(weight: .semibold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isCurrent ? settingsAccentColor.opacity(0.12) : Color(.secondarySystemBackground))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isCurrent ? settingsAccentColor : Color(.separator), lineWidth: isCurrent ? 1.5 : 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture {
+            switchRelayAccount(account.id)
         }
     }
 
@@ -460,7 +628,6 @@ private extension SettingsView {
     func disconnectRelay() {
         Task { @MainActor in
             await codex.disconnect()
-            codex.clearSavedRelaySession()
         }
     }
 
@@ -476,6 +643,21 @@ private extension SettingsView {
             codex.connectionRecoveryState = .retrying(attempt: 0, message: "Reconnecting...")
             codex.lastErrorMessage = nil
             await contentViewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
+            await refreshRelaySourceProbeStates()
+        }
+    }
+
+    func switchRelayAccount(_ accountId: String) {
+        let didChange = codex.switchRelayAccount(to: accountId)
+        guard didChange else {
+            return
+        }
+        HapticFeedback.shared.triggerImpactFeedback()
+        if codex.isConnected {
+            retryRelayConnection()
+            return
+        }
+        Task { @MainActor in
             await refreshRelaySourceProbeStates()
         }
     }
@@ -551,6 +733,13 @@ private extension SettingsView {
         return sourceScheme == currentScheme
             && sourceHost == currentHost
             && sourcePort == currentPort
+    }
+
+    func relayAccountLastConnectedText(_ account: CodexRelayAccountProfile) -> String? {
+        guard let date = account.lastConnectedAt else {
+            return nil
+        }
+        return "Last connected: \(date.formatted(date: .abbreviated, time: .shortened))"
     }
 }
 

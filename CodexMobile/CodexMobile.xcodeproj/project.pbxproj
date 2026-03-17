@@ -29,6 +29,8 @@
 		B1C2D3E4F5061728394A5B6C /* CodexServiceIncomingCommandExecutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D2E3F40516273849A5B6C7 /* CodexServiceIncomingCommandExecutionTests.swift */; };
 		B3C4D5E6F708192A3B4C5D6E /* CodexPlanModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3C4D5E6F708192A3B4C5D6F /* CodexPlanModeTests.swift */; };
 		B7A1C2D3E4F5061728394051 /* SidebarThreadGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */; };
+		C7A1B2C3D4E5F60718293A55 /* CodexRelayAccountManagementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A1B2C3D4E5F60718293A56 /* CodexRelayAccountManagementTests.swift */; };
+		C7A1B2C3D4E5F60718293A57 /* SettingsRelaySourceProbeStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7A1B2C3D4E5F60718293A58 /* SettingsRelaySourceProbeStateTests.swift */; };
 		C0DED3362F5E39DC0021A8E8 /* Textual in Frameworks */ = {isa = PBXBuildFile; productRef = C0DED3352F5E39DC0021A8E8 /* Textual */; };
 		D27B9CA5F0B60ECA8AF38016 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A37794F4B32C1952A3770E0 /* Foundation.framework */; };
 		D4F56781234567890ABCDE01 /* CodexServiceIncomingRunIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */; };
@@ -77,6 +79,8 @@
 		B0C1D2E3F40516273849A5B6 /* TurnSlashCommandTokenTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnSlashCommandTokenTests.swift; sourceTree = "<group>"; };
 		B3C4D5E6F708192A3B4C5D6F /* CodexPlanModeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexPlanModeTests.swift; sourceTree = "<group>"; };
 		B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SidebarThreadGroupingTests.swift; sourceTree = "<group>"; };
+		C7A1B2C3D4E5F60718293A56 /* CodexRelayAccountManagementTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexRelayAccountManagementTests.swift; sourceTree = "<group>"; };
+		C7A1B2C3D4E5F60718293A58 /* SettingsRelaySourceProbeStateTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SettingsRelaySourceProbeStateTests.swift; sourceTree = "<group>"; };
 		C09A76AE2F4B8D7B003B3F3A /* CodexMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CodexMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C1D2E3F40516273849A5B6C7 /* CodexServiceIncomingCommandExecutionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceIncomingCommandExecutionTests.swift; sourceTree = "<group>"; };
 		D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceIncomingRunIndicatorTests.swift; sourceTree = "<group>"; };
@@ -141,8 +145,10 @@
 				F1A2B3C4D5E6F708192A3B4D /* QRScannerViewModelTests.swift */,
 				B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */,
 				8CE11223A4B5C6D7E8F90124 /* SidebarRunBadgePerformanceTests.swift */,
+				C7A1B2C3D4E5F60718293A56 /* CodexRelayAccountManagementTests.swift */,
 				E1A2B3C4D5E6F708192A3B4D /* SidebarViewModelTests.swift */,
 				F2A2B3C4D5E6F708192A3B4D /* SettingsConnectionDomainFormatterTests.swift */,
+				C7A1B2C3D4E5F60718293A58 /* SettingsRelaySourceProbeStateTests.swift */,
 				8B4A2F5E7D1C4B9AA1234568 /* TurnComposerAttachmentIntakePlanTests.swift */,
 				74BE370810CFD7A76DC2A25F /* TurnComposerSendAvailabilityTests.swift */,
 				AB1C2D3E4F5061728394A5B6 /* TurnComposerReviewModeTests.swift */,
@@ -359,8 +365,10 @@
 				F1A2B3C4D5E6F708192A3B4C /* QRScannerViewModelTests.swift in Sources */,
 				B7A1C2D3E4F5061728394051 /* SidebarThreadGroupingTests.swift in Sources */,
 				8CE11223A4B5C6D7E8F90123 /* SidebarRunBadgePerformanceTests.swift in Sources */,
+				C7A1B2C3D4E5F60718293A55 /* CodexRelayAccountManagementTests.swift in Sources */,
 				E1A2B3C4D5E6F708192A3B4C /* SidebarViewModelTests.swift in Sources */,
 				F2A2B3C4D5E6F708192A3B4C /* SettingsConnectionDomainFormatterTests.swift in Sources */,
+				C7A1B2C3D4E5F60718293A57 /* SettingsRelaySourceProbeStateTests.swift in Sources */,
 				8B4A2F5E7D1C4B9AA1234567 /* TurnComposerAttachmentIntakePlanTests.swift in Sources */,
 				4C0F0D55A5051D8301463C69 /* TurnComposerSendAvailabilityTests.swift in Sources */,
 				AB1C2D3E4F5061728394A5B7 /* TurnComposerReviewModeTests.swift in Sources */,

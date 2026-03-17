@@ -76,7 +76,6 @@ final class ContentViewModel {
 
         if codex.isConnected {
             await codex.disconnect()
-            codex.clearSavedRelaySession()
             return
         }
 

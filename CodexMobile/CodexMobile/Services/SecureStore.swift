@@ -16,6 +16,7 @@ enum CodexSecureKeys {
     static let relayMacIdentityPublicKey = "codex.relay.macIdentityPublicKey"
     static let relayProtocolVersion = "codex.relay.protocolVersion"
     static let relayLastAppliedBridgeOutboundSeq = "codex.relay.lastAppliedBridgeOutboundSeq"
+    static let relayAccounts = "codex.relay.accounts"
     static let trustedMacRegistry = "codex.secure.trustedMacRegistry"
     static let phoneIdentityState = "codex.secure.phoneIdentityState"
     static let messageHistoryKey = "codex.local.messageHistoryKey"

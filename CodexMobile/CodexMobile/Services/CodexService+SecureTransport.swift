@@ -252,27 +252,44 @@ extension CodexService {
             primaryRelay: payload.relay,
             candidates: payload.relayCandidates ?? []
         )
-        let encodedRelayCandidates = (try? JSONEncoder().encode(normalizedRelayCandidates))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
-
-        SecureStore.writeString(payload.sessionId, for: CodexSecureKeys.relaySessionId)
-        SecureStore.writeString(payload.relay, for: CodexSecureKeys.relayUrl)
-        SecureStore.writeString(encodedRelayCandidates, for: CodexSecureKeys.relayCandidates)
-        SecureStore.writeString(payload.relayAuthKey ?? "", for: CodexSecureKeys.relayAuthKey)
-        SecureStore.writeString(payload.macDeviceId, for: CodexSecureKeys.relayMacDeviceId)
-        SecureStore.writeString(payload.macIdentityPublicKey, for: CodexSecureKeys.relayMacIdentityPublicKey)
-        SecureStore.writeString(String(codexSecureProtocolVersion), for: CodexSecureKeys.relayProtocolVersion)
-        SecureStore.writeString("0", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
-        relaySessionId = payload.sessionId
-        relayUrl = payload.relay
-        relayCandidates = normalizedRelayCandidates
-        relayAuthKey = payload.relayAuthKey
-        relayMacDeviceId = payload.macDeviceId
-        relayMacIdentityPublicKey = payload.macIdentityPublicKey
-        relayProtocolVersion = codexSecureProtocolVersion
-        lastAppliedBridgeOutboundSeq = 0
+        let relayHost = URLComponents(string: payload.relay)?.host ?? "Relay"
+        let existing = relayAccountProfiles.first {
+            $0.relayMacDeviceId == payload.macDeviceId && $0.relaySessionId == payload.sessionId
+        }
+        var profile = newRelayAccountProfile(
+            displayName: existing?.displayName ?? relayHost,
+            relay: payload.relay,
+            relayCandidates: normalizedRelayCandidates,
+            relayAuthKey: payload.relayAuthKey,
+            sessionId: payload.sessionId,
+            macDeviceId: payload.macDeviceId,
+            macIdentityPublicKey: payload.macIdentityPublicKey,
+            protocolVersion: codexSecureProtocolVersion,
+            lastAppliedBridgeOutboundSeq: 0
+        )
+        if let existing {
+            profile = CodexRelayAccountProfile(
+                id: existing.id,
+                displayName: existing.displayName,
+                createdAt: existing.createdAt,
+                lastUsedAt: Date(),
+                lastConnectedAt: existing.lastConnectedAt,
+                lastErrorMessage: existing.lastErrorMessage,
+                relaySessionId: profile.relaySessionId,
+                relayURL: profile.relayURL,
+                relayCandidates: profile.relayCandidates,
+                relayAuthKey: profile.relayAuthKey,
+                relayMacDeviceId: profile.relayMacDeviceId,
+                relayMacIdentityPublicKey: profile.relayMacIdentityPublicKey,
+                relayProtocolVersion: profile.relayProtocolVersion,
+                lastAppliedBridgeOutboundSeq: profile.lastAppliedBridgeOutboundSeq
+            )
+        }
+        upsertRelayAccount(profile)
+        _ = switchRelayAccount(to: profile.id)
         secureConnectionState = trustedMacRegistry.records[payload.macDeviceId] == nil ? .handshaking : .trustedMac
         secureMacFingerprint = codexSecureFingerprint(for: payload.macIdentityPublicKey)
+        relayAccountManagementMessage = nil
     }
 
     // Resets volatile secure state while preserving the trusted-device registry.

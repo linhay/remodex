@@ -96,7 +96,7 @@ extension CodexService {
 
     func setRelaySourcePreference(_ preference: CodexRelaySourcePreference) {
         selectedRelaySourcePreference = preference
-        defaults.set(preference.rawValue, forKey: Self.selectedRelaySourcePreferenceDefaultsKey)
+        defaults.set(preference.rawValue, forKey: accountScopedDefaultsKey(Self.selectedRelaySourcePreferenceDefaultsKey))
     }
 
     @discardableResult
@@ -108,9 +108,9 @@ extension CodexService {
         let didChange = selectedRelayBaseURL != sanitized
         selectedRelayBaseURL = sanitized
         if let sanitized {
-            defaults.set(sanitized, forKey: Self.selectedRelayBaseURLDefaultsKey)
+            defaults.set(sanitized, forKey: accountScopedDefaultsKey(Self.selectedRelayBaseURLDefaultsKey))
         } else {
-            defaults.removeObject(forKey: Self.selectedRelayBaseURLDefaultsKey)
+            defaults.removeObject(forKey: accountScopedDefaultsKey(Self.selectedRelayBaseURLDefaultsKey))
         }
         return didChange
     }
@@ -327,23 +327,23 @@ private extension CodexService {
 
     func persistRuntimeSelections() {
         if let selectedModelId, !selectedModelId.isEmpty {
-            defaults.set(selectedModelId, forKey: Self.selectedModelIdDefaultsKey)
+            defaults.set(selectedModelId, forKey: accountScopedDefaultsKey(Self.selectedModelIdDefaultsKey))
         } else {
-            defaults.removeObject(forKey: Self.selectedModelIdDefaultsKey)
+            defaults.removeObject(forKey: accountScopedDefaultsKey(Self.selectedModelIdDefaultsKey))
         }
 
         if let selectedReasoningEffort, !selectedReasoningEffort.isEmpty {
-            defaults.set(selectedReasoningEffort, forKey: Self.selectedReasoningEffortDefaultsKey)
+            defaults.set(selectedReasoningEffort, forKey: accountScopedDefaultsKey(Self.selectedReasoningEffortDefaultsKey))
         } else {
-            defaults.removeObject(forKey: Self.selectedReasoningEffortDefaultsKey)
+            defaults.removeObject(forKey: accountScopedDefaultsKey(Self.selectedReasoningEffortDefaultsKey))
         }
 
         if let selectedServiceTier {
-            defaults.set(selectedServiceTier.rawValue, forKey: Self.selectedServiceTierDefaultsKey)
+            defaults.set(selectedServiceTier.rawValue, forKey: accountScopedDefaultsKey(Self.selectedServiceTierDefaultsKey))
         } else {
-            defaults.removeObject(forKey: Self.selectedServiceTierDefaultsKey)
+            defaults.removeObject(forKey: accountScopedDefaultsKey(Self.selectedServiceTierDefaultsKey))
         }
 
-        defaults.set(selectedAccessMode.rawValue, forKey: Self.selectedAccessModeDefaultsKey)
+        defaults.set(selectedAccessMode.rawValue, forKey: accountScopedDefaultsKey(Self.selectedAccessModeDefaultsKey))
     }
 }

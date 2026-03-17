@@ -9,7 +9,7 @@ import Foundation
 
 struct CodexMessagePersistence {
     // v6 encrypts the on-device message cache while keeping backward-compatible legacy fallbacks.
-    private let fileName = "codex-message-history-v6.bin"
+    private let fileName: String
     private let legacyFileNames = [
         "codex-message-history-v5.json",
         "codex-message-history-v4.json",
@@ -17,6 +17,22 @@ struct CodexMessagePersistence {
         "codex-message-history-v2.json",
         "codex-message-history.json",
     ]
+    private let accountScope: String?
+
+    init(accountScope: String? = nil) {
+        let trimmedScope = accountScope?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.accountScope = trimmedScope.isEmpty ? nil : trimmedScope
+        if let accountScope = self.accountScope {
+            let normalized = accountScope.replacingOccurrences(
+                of: "[^A-Za-z0-9_-]",
+                with: "_",
+                options: .regularExpression
+            )
+            self.fileName = "codex-message-history-\(normalized)-v6.bin"
+        } else {
+            self.fileName = "codex-message-history-v6.bin"
+        }
+    }
 
     // Loads the saved message map from disk. Returns an empty store on failure.
     func load() -> [String: [CodexMessage]] {
@@ -64,7 +80,7 @@ struct CodexMessagePersistence {
             ?? fm.temporaryDirectory
         let bundleID = Bundle.main.bundleIdentifier ?? "com.codexmobile.app"
         let directory = base.appendingPathComponent(bundleID, isDirectory: true)
-        let names = [fileName] + legacyFileNames
+        let names = accountScope == nil ? [fileName] + legacyFileNames : [fileName]
         return names.map { directory.appendingPathComponent($0, isDirectory: false) }
     }
 
@@ -90,14 +106,22 @@ struct CodexMessagePersistence {
     }
 
     private func messageHistoryKey() -> SymmetricKey {
-        if let storedKey = SecureStore.readData(for: CodexSecureKeys.messageHistoryKey) {
+        let keyName = messageHistoryKeyName
+        if let storedKey = SecureStore.readData(for: keyName) {
             return SymmetricKey(data: storedKey)
         }
 
         let newKey = SymmetricKey(size: .bits256)
         let keyData = newKey.withUnsafeBytes { Data($0) }
-        SecureStore.writeData(keyData, for: CodexSecureKeys.messageHistoryKey)
+        SecureStore.writeData(keyData, for: keyName)
         return newKey
+    }
+
+    private var messageHistoryKeyName: String {
+        guard let accountScope else {
+            return CodexSecureKeys.messageHistoryKey
+        }
+        return "\(CodexSecureKeys.messageHistoryKey).\(accountScope)"
     }
 
     // Structured input cards are live request state, not durable history; dropping them

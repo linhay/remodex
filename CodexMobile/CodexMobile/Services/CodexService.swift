@@ -240,6 +240,9 @@ final class CodexService {
     var pendingComposerActionByThreadID: [String: CodexPendingThreadComposerAction] = [:]
 
     // Relay session persistence
+    var relayAccountProfiles: [CodexRelayAccountProfile] = []
+    var activeRelayAccountID: String?
+    var relayAccountManagementMessage: String?
     var relaySessionId: String?
     var relayUrl: String?
     var relayCandidates: [String] = []
@@ -322,8 +325,8 @@ final class CodexService {
 
     let encoder: JSONEncoder
     let decoder: JSONDecoder
-    let messagePersistence = CodexMessagePersistence()
-    let aiChangeSetPersistence = AIChangeSetPersistence()
+    var messagePersistence = CodexMessagePersistence()
+    var aiChangeSetPersistence = AIChangeSetPersistence()
     let defaults: UserDefaults
     let userNotificationCenter: CodexUserNotificationCentering
 
@@ -334,6 +337,7 @@ final class CodexService {
     static let selectedRelaySourcePreferenceDefaultsKey = "codex.selectedRelaySourcePreference"
     static let selectedRelayBaseURLDefaultsKey = "codex.selectedRelayBaseURL"
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
+    static let activeRelayAccountIDDefaultsKey = "codex.activeRelayAccountID"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
 
     init(
@@ -348,96 +352,12 @@ final class CodexService {
         self.userNotificationCenter = userNotificationCenter
         self.phoneIdentityState = codexPhoneIdentityStateFromSecureStore()
         self.trustedMacRegistry = codexTrustedMacRegistryFromSecureStore()
-        let loadedMessages = messagePersistence.load().mapValues { messages in
-            messages.map { message in
-                var value = message
-                // Streaming cannot survive app relaunch; clear stale flags loaded from disk.
-                value.isStreaming = false
-                return value
-            }
-        }
-        CodexMessageOrderCounter.seed(from: loadedMessages)
-        self.messagesByThread = loadedMessages
-
-        let loadedChangeSets = aiChangeSetPersistence.load()
-        self.aiChangeSetsByID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
-            partialResult[changeSet.id] = changeSet
-        }
-        self.aiChangeSetIDByTurnID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
-            partialResult[changeSet.turnId] = changeSet.id
-        }
-        self.aiChangeSetIDByAssistantMessageID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
-            if let assistantMessageId = changeSet.assistantMessageId {
-                partialResult[assistantMessageId] = changeSet.id
-            }
-        }
-
-        let savedModelId = defaults.string(forKey: Self.selectedModelIdDefaultsKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        self.selectedModelId = (savedModelId?.isEmpty == false) ? savedModelId : nil
-
-        let savedReasoning = defaults.string(forKey: Self.selectedReasoningEffortDefaultsKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        self.selectedReasoningEffort = (savedReasoning?.isEmpty == false) ? savedReasoning : nil
-
-        let savedServiceTier = defaults.string(forKey: Self.selectedServiceTierDefaultsKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if savedServiceTier == "flex" {
-            self.selectedServiceTier = nil
-        } else if let savedServiceTier,
-           let parsedServiceTier = CodexServiceTier(rawValue: savedServiceTier) {
-            self.selectedServiceTier = parsedServiceTier
-        } else {
-            self.selectedServiceTier = nil
-        }
-
-        if let savedAccessMode = defaults.string(forKey: Self.selectedAccessModeDefaultsKey),
-           let parsedAccessMode = CodexAccessMode(rawValue: savedAccessMode) {
-            self.selectedAccessMode = parsedAccessMode
-        } else {
-            self.selectedAccessMode = .onRequest
-        }
-
-        if let savedRelaySourcePreference = defaults.string(forKey: Self.selectedRelaySourcePreferenceDefaultsKey),
-           let parsedRelaySourcePreference = CodexRelaySourcePreference(rawValue: savedRelaySourcePreference) {
-            self.selectedRelaySourcePreference = parsedRelaySourcePreference
-        } else {
-            self.selectedRelaySourcePreference = .auto
-        }
-
-        let savedRelayBaseURL = defaults.string(forKey: Self.selectedRelayBaseURLDefaultsKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
-        self.selectedRelayBaseURL = (savedRelayBaseURL?.isEmpty == false) ? savedRelayBaseURL : nil
-
-        // Restore relay session from Keychain
-        self.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
-        self.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
-        if let rawRelayCandidates = SecureStore.readString(for: CodexSecureKeys.relayCandidates),
-           let data = rawRelayCandidates.data(using: .utf8),
-           let decoded = try? JSONDecoder().decode([String].self, from: data) {
-            self.relayCandidates = decoded
-        } else {
-            self.relayCandidates = []
-        }
-        self.relayAuthKey = SecureStore.readString(for: CodexSecureKeys.relayAuthKey)
-        self.relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)
-        self.relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)
-        if let rawProtocolVersion = SecureStore.readString(for: CodexSecureKeys.relayProtocolVersion),
-           let parsedProtocolVersion = Int(rawProtocolVersion) {
-            self.relayProtocolVersion = parsedProtocolVersion
-        } else {
-            self.relayProtocolVersion = codexSecureProtocolVersion
-        }
-        if let rawLastAppliedSeq = SecureStore.readString(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq),
-           let parsedLastAppliedSeq = Int(rawLastAppliedSeq) {
-            self.lastAppliedBridgeOutboundSeq = parsedLastAppliedSeq
-        }
-        if let relayMacDeviceId,
-           let trustedMac = trustedMacRegistry.records[relayMacDeviceId] {
-            self.secureConnectionState = .trustedMac
-            self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
-        }
+        loadPersistedRelayAccounts()
+        restoreActiveRelayAccount()
+        configurePersistenceForActiveRelayAccount()
+        loadAccountScopedCaches()
+        loadAccountScopedRuntimeSelections()
+        refreshSecureStateForActiveAccountIfNeeded()
     }
 
     // Remembers whether we can offer reconnect without forcing a fresh QR scan.
@@ -519,6 +439,398 @@ final class CodexService {
         }
 
         return .connected
+    }
+}
+
+extension CodexService {
+    var activeRelayAccount: CodexRelayAccountProfile? {
+        guard let activeRelayAccountID else {
+            return nil
+        }
+        return relayAccountProfiles.first(where: { $0.id == activeRelayAccountID })
+    }
+
+    var sortedRelayAccounts: [CodexRelayAccountProfile] {
+        relayAccountProfiles.sorted { lhs, rhs in
+            if lhs.id == activeRelayAccountID { return true }
+            if rhs.id == activeRelayAccountID { return false }
+            if lhs.lastUsedAt != rhs.lastUsedAt {
+                return lhs.lastUsedAt > rhs.lastUsedAt
+            }
+            return lhs.createdAt < rhs.createdAt
+        }
+    }
+
+    func accountScopedDefaultsKey(_ baseKey: String, accountId: String? = nil) -> String {
+        guard let accountID = (accountId ?? activeRelayAccountID)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty else {
+            return baseKey
+        }
+        return "\(baseKey).\(accountID)"
+    }
+
+    func switchRelayAccount(to accountId: String) -> Bool {
+        guard relayAccountProfiles.contains(where: { $0.id == accountId }),
+              activeRelayAccountID != accountId else {
+            return false
+        }
+
+        persistCurrentAccountCaches()
+        activeRelayAccountID = accountId
+        defaults.set(accountId, forKey: Self.activeRelayAccountIDDefaultsKey)
+        applyActiveRelayAccountFields()
+        configurePersistenceForActiveRelayAccount()
+        loadAccountScopedCaches()
+        loadAccountScopedRuntimeSelections()
+        refreshSecureStateForActiveAccountIfNeeded()
+        updateActiveRelayAccount { profile in
+            profile.lastUsedAt = Date()
+        }
+        relayAccountManagementMessage = nil
+        return true
+    }
+
+    func renameRelayAccount(id: String, displayName: String) {
+        guard let index = relayAccountProfiles.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        relayAccountProfiles[index].displayName = trimmed
+        persistRelayAccounts()
+    }
+
+    @discardableResult
+    func deleteRelayAccount(id: String) -> Bool {
+        guard id != activeRelayAccountID else {
+            relayAccountManagementMessage = "当前账号不可删除，请先切换到其他账号。"
+            return false
+        }
+        guard let index = relayAccountProfiles.firstIndex(where: { $0.id == id }) else {
+            return false
+        }
+        relayAccountProfiles.remove(at: index)
+        persistRelayAccounts()
+        relayAccountManagementMessage = nil
+        return true
+    }
+
+    func exportRelayAccount(id: String) -> Data? {
+        guard let profile = relayAccountProfiles.first(where: { $0.id == id }) else {
+            return nil
+        }
+        let envelope = CodexRelayAccountExportEnvelope(
+            v: CodexRelayAccountExportEnvelope.currentVersion,
+            exportedAt: Date(),
+            profile: profile
+        )
+        return try? JSONEncoder().encode(envelope)
+    }
+
+    @discardableResult
+    func importRelayAccount(data: Data) -> Bool {
+        guard let envelope = try? JSONDecoder().decode(CodexRelayAccountExportEnvelope.self, from: data),
+              envelope.v == CodexRelayAccountExportEnvelope.currentVersion else {
+            return false
+        }
+
+        var importedProfile = envelope.profile
+        if importedProfile.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            importedProfile = newRelayAccountProfile(
+                displayName: importedProfile.displayName,
+                relay: importedProfile.relayURL,
+                relayCandidates: importedProfile.relayCandidates,
+                relayAuthKey: importedProfile.relayAuthKey,
+                sessionId: importedProfile.relaySessionId,
+                macDeviceId: importedProfile.relayMacDeviceId,
+                macIdentityPublicKey: importedProfile.relayMacIdentityPublicKey,
+                protocolVersion: importedProfile.relayProtocolVersion,
+                lastAppliedBridgeOutboundSeq: importedProfile.lastAppliedBridgeOutboundSeq
+            )
+        }
+
+        upsertRelayAccount(importedProfile)
+        _ = switchRelayAccount(to: importedProfile.id)
+        return true
+    }
+
+    func markActiveRelayAccountConnected() {
+        guard let activeRelayAccountID,
+              let index = relayAccountProfiles.firstIndex(where: { $0.id == activeRelayAccountID }) else {
+            return
+        }
+        relayAccountProfiles[index].lastConnectedAt = Date()
+        relayAccountProfiles[index].lastErrorMessage = nil
+        relayAccountProfiles[index].lastUsedAt = Date()
+        persistRelayAccounts()
+    }
+
+    func markActiveRelayAccountError(_ message: String?) {
+        guard let activeRelayAccountID,
+              let index = relayAccountProfiles.firstIndex(where: { $0.id == activeRelayAccountID }) else {
+            return
+        }
+        let trimmed = message?.trimmingCharacters(in: .whitespacesAndNewlines)
+        relayAccountProfiles[index].lastErrorMessage = trimmed?.nilIfEmpty
+        persistRelayAccounts()
+    }
+}
+
+extension CodexService {
+    func loadPersistedRelayAccounts() {
+        relayAccountProfiles = SecureStore.readCodable([CodexRelayAccountProfile].self, for: CodexSecureKeys.relayAccounts) ?? []
+        guard relayAccountProfiles.isEmpty else {
+            return
+        }
+
+        guard let legacy = legacyRelayProfileIfPresent() else {
+            return
+        }
+        relayAccountProfiles = [legacy]
+        activeRelayAccountID = legacy.id
+        defaults.set(legacy.id, forKey: Self.activeRelayAccountIDDefaultsKey)
+        persistRelayAccounts()
+        clearLegacyRelaySessionKeys()
+    }
+
+    func restoreActiveRelayAccount() {
+        if let savedActiveID = defaults.string(forKey: Self.activeRelayAccountIDDefaultsKey),
+           relayAccountProfiles.contains(where: { $0.id == savedActiveID }) {
+            activeRelayAccountID = savedActiveID
+        } else {
+            activeRelayAccountID = relayAccountProfiles.first?.id
+            if let activeRelayAccountID {
+                defaults.set(activeRelayAccountID, forKey: Self.activeRelayAccountIDDefaultsKey)
+            } else {
+                defaults.removeObject(forKey: Self.activeRelayAccountIDDefaultsKey)
+            }
+        }
+        applyActiveRelayAccountFields()
+    }
+
+    func applyActiveRelayAccountFields() {
+        guard let activeRelayAccount else {
+            relaySessionId = nil
+            relayUrl = nil
+            relayCandidates = []
+            relayAuthKey = nil
+            relayMacDeviceId = nil
+            relayMacIdentityPublicKey = nil
+            relayProtocolVersion = codexSecureProtocolVersion
+            lastAppliedBridgeOutboundSeq = 0
+            return
+        }
+
+        relaySessionId = activeRelayAccount.relaySessionId
+        relayUrl = activeRelayAccount.relayURL
+        relayCandidates = activeRelayAccount.relayCandidates
+        relayAuthKey = activeRelayAccount.relayAuthKey
+        relayMacDeviceId = activeRelayAccount.relayMacDeviceId
+        relayMacIdentityPublicKey = activeRelayAccount.relayMacIdentityPublicKey
+        relayProtocolVersion = activeRelayAccount.relayProtocolVersion
+        lastAppliedBridgeOutboundSeq = activeRelayAccount.lastAppliedBridgeOutboundSeq
+    }
+
+    func persistRelayAccounts() {
+        SecureStore.writeCodable(relayAccountProfiles, for: CodexSecureKeys.relayAccounts)
+    }
+
+    func updateActiveRelayAccount(using updater: (inout CodexRelayAccountProfile) -> Void) {
+        guard let activeRelayAccountID,
+              let index = relayAccountProfiles.firstIndex(where: { $0.id == activeRelayAccountID }) else {
+            return
+        }
+        updater(&relayAccountProfiles[index])
+        persistRelayAccounts()
+    }
+
+    func upsertRelayAccount(_ profile: CodexRelayAccountProfile) {
+        if let index = relayAccountProfiles.firstIndex(where: { $0.id == profile.id }) {
+            relayAccountProfiles[index] = profile
+        } else {
+            relayAccountProfiles.append(profile)
+        }
+        persistRelayAccounts()
+    }
+
+    func newRelayAccountProfile(
+        displayName: String,
+        relay: String,
+        relayCandidates: [String],
+        relayAuthKey: String?,
+        sessionId: String,
+        macDeviceId: String,
+        macIdentityPublicKey: String,
+        protocolVersion: Int,
+        lastAppliedBridgeOutboundSeq: Int
+    ) -> CodexRelayAccountProfile {
+        let now = Date()
+        return CodexRelayAccountProfile(
+            id: UUID().uuidString.lowercased(),
+            displayName: displayName,
+            createdAt: now,
+            lastUsedAt: now,
+            lastConnectedAt: nil,
+            lastErrorMessage: nil,
+            relaySessionId: sessionId,
+            relayURL: relay,
+            relayCandidates: relayCandidates,
+            relayAuthKey: relayAuthKey,
+            relayMacDeviceId: macDeviceId,
+            relayMacIdentityPublicKey: macIdentityPublicKey,
+            relayProtocolVersion: protocolVersion,
+            lastAppliedBridgeOutboundSeq: lastAppliedBridgeOutboundSeq
+        )
+    }
+
+    func legacyRelayProfileIfPresent() -> CodexRelayAccountProfile? {
+        guard let relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)?.nilIfEmpty,
+              let relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)?.nilIfEmpty,
+              let relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)?.nilIfEmpty,
+              let relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)?.nilIfEmpty else {
+            return nil
+        }
+
+        let relayAuthKey = SecureStore.readString(for: CodexSecureKeys.relayAuthKey)
+        let relayCandidates = (SecureStore.readString(for: CodexSecureKeys.relayCandidates)
+            .flatMap { $0.data(using: .utf8) }
+            .flatMap { try? JSONDecoder().decode([String].self, from: $0) }) ?? [relayUrl]
+        let protocolVersion = Int(SecureStore.readString(for: CodexSecureKeys.relayProtocolVersion) ?? "") ?? codexSecureProtocolVersion
+        let lastAppliedSeq = Int(SecureStore.readString(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq) ?? "") ?? 0
+        let host = URLComponents(string: relayUrl)?.host ?? "Relay"
+        return newRelayAccountProfile(
+            displayName: "Migrated · \(host)",
+            relay: relayUrl,
+            relayCandidates: relayCandidates,
+            relayAuthKey: relayAuthKey,
+            sessionId: relaySessionId,
+            macDeviceId: relayMacDeviceId,
+            macIdentityPublicKey: relayMacIdentityPublicKey,
+            protocolVersion: protocolVersion,
+            lastAppliedBridgeOutboundSeq: lastAppliedSeq
+        )
+    }
+
+    func clearLegacyRelaySessionKeys() {
+        SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayCandidates)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayAuthKey)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayProtocolVersion)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
+    }
+
+    func configurePersistenceForActiveRelayAccount() {
+        messagePersistence = CodexMessagePersistence(accountScope: activeRelayAccountID)
+        aiChangeSetPersistence = AIChangeSetPersistence(accountScope: activeRelayAccountID)
+    }
+
+    func persistCurrentAccountCaches() {
+        messagePersistence.save(messagesByThread)
+        aiChangeSetPersistence.save(
+            aiChangeSetsByID.values.sorted {
+                if $0.createdAt != $1.createdAt {
+                    return $0.createdAt < $1.createdAt
+                }
+                return $0.id < $1.id
+            }
+        )
+    }
+
+    func loadAccountScopedCaches() {
+        messageRevisionByThread = [:]
+        threadIdByTurnID = [:]
+        threadTimelineStateByThread = [:]
+        stoppedTurnIDsByThread = [:]
+        latestAssistantOutputByThread = [:]
+        latestRepoAffectingMessageSignalByThread = [:]
+        assistantRevertStateCacheByThread = [:]
+        assistantRevertStateRevision = 0
+        queuedTurnDraftsByThread = [:]
+        queuePauseStateByThread = [:]
+        activeThreadId = nil
+        activeTurnId = nil
+        activeTurnIdByThread = [:]
+        currentOutput = ""
+        threads = []
+        let loadedMessages = messagePersistence.load().mapValues { messages in
+            messages.map { message in
+                var value = message
+                value.isStreaming = false
+                return value
+            }
+        }
+        CodexMessageOrderCounter.seed(from: loadedMessages)
+        messagesByThread = loadedMessages
+
+        let loadedChangeSets = aiChangeSetPersistence.load()
+        aiChangeSetsByID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
+            partialResult[changeSet.id] = changeSet
+        }
+        aiChangeSetIDByTurnID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
+            partialResult[changeSet.turnId] = changeSet.id
+        }
+        aiChangeSetIDByAssistantMessageID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
+            if let assistantMessageId = changeSet.assistantMessageId {
+                partialResult[assistantMessageId] = changeSet.id
+            }
+        }
+    }
+
+    func loadAccountScopedRuntimeSelections() {
+        let savedModelId = defaults.string(forKey: accountScopedDefaultsKey(Self.selectedModelIdDefaultsKey))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        selectedModelId = (savedModelId?.isEmpty == false) ? savedModelId : nil
+
+        let savedReasoning = defaults.string(forKey: accountScopedDefaultsKey(Self.selectedReasoningEffortDefaultsKey))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        selectedReasoningEffort = (savedReasoning?.isEmpty == false) ? savedReasoning : nil
+
+        let savedServiceTier = defaults.string(forKey: accountScopedDefaultsKey(Self.selectedServiceTierDefaultsKey))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if savedServiceTier == "flex" {
+            selectedServiceTier = nil
+        } else if let savedServiceTier,
+                  let parsedServiceTier = CodexServiceTier(rawValue: savedServiceTier) {
+            selectedServiceTier = parsedServiceTier
+        } else {
+            selectedServiceTier = nil
+        }
+
+        if let savedAccessMode = defaults.string(forKey: accountScopedDefaultsKey(Self.selectedAccessModeDefaultsKey)),
+           let parsedAccessMode = CodexAccessMode(rawValue: savedAccessMode) {
+            selectedAccessMode = parsedAccessMode
+        } else {
+            selectedAccessMode = .onRequest
+        }
+
+        if let savedRelaySourcePreference = defaults.string(forKey: accountScopedDefaultsKey(Self.selectedRelaySourcePreferenceDefaultsKey)),
+           let parsedRelaySourcePreference = CodexRelaySourcePreference(rawValue: savedRelaySourcePreference) {
+            selectedRelaySourcePreference = parsedRelaySourcePreference
+        } else {
+            selectedRelaySourcePreference = .auto
+        }
+
+        let savedRelayBaseURL = defaults.string(forKey: accountScopedDefaultsKey(Self.selectedRelayBaseURLDefaultsKey))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+        selectedRelayBaseURL = (savedRelayBaseURL?.isEmpty == false) ? savedRelayBaseURL : nil
+    }
+
+    func refreshSecureStateForActiveAccountIfNeeded() {
+        if let relayMacDeviceId,
+           let trustedMac = trustedMacRegistry.records[relayMacDeviceId] {
+            secureConnectionState = .trustedMac
+            secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
+        } else if activeRelayAccountID == nil {
+            secureConnectionState = .notPaired
+            secureMacFingerprint = nil
+        }
     }
 }
 

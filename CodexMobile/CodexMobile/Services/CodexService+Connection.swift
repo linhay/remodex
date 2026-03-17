@@ -21,6 +21,7 @@ extension CodexService {
     ) async throws {
         guard !isConnecting else {
             lastErrorMessage = "Connection already in progress"
+            markActiveRelayAccountError(lastErrorMessage)
             throw CodexServiceError.invalidInput("Connection already in progress")
         }
 
@@ -52,6 +53,7 @@ extension CodexService {
                 lastErrorMessage = nil
             } else {
                 lastErrorMessage = friendlyMessage
+                markActiveRelayAccountError(friendlyMessage)
             }
             throw CodexServiceError.invalidInput(friendlyMessage)
         }
@@ -66,6 +68,7 @@ extension CodexService {
             shouldAutoReconnectOnForeground = false
             connectionRecoveryState = .idle
             lastErrorMessage = nil
+            markActiveRelayAccountConnected()
             try await initializeSession()
 
             startSyncLoop()
@@ -133,24 +136,35 @@ extension CodexService {
 
     // Clears the remembered relay pairing when the remote Mac session is gone for good.
     func clearSavedRelaySession() {
-        SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
-        SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
-        SecureStore.deleteValue(for: CodexSecureKeys.relayCandidates)
-        SecureStore.deleteValue(for: CodexSecureKeys.relayAuthKey)
-        SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
-        SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
-        SecureStore.deleteValue(for: CodexSecureKeys.relayProtocolVersion)
-        SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
-        relaySessionId = nil
-        relayUrl = nil
-        relayCandidates = []
-        relayAuthKey = nil
-        relayMacDeviceId = nil
-        relayMacIdentityPublicKey = nil
-        relayProtocolVersion = codexSecureProtocolVersion
-        lastAppliedBridgeOutboundSeq = 0
-        secureConnectionState = .notPaired
-        secureMacFingerprint = nil
+        guard let activeRelayAccountID else {
+            clearLegacyRelaySessionKeys()
+            relaySessionId = nil
+            relayUrl = nil
+            relayCandidates = []
+            relayAuthKey = nil
+            relayMacDeviceId = nil
+            relayMacIdentityPublicKey = nil
+            relayProtocolVersion = codexSecureProtocolVersion
+            lastAppliedBridgeOutboundSeq = 0
+            secureConnectionState = .notPaired
+            secureMacFingerprint = nil
+            clearTransientConnectionPrompts()
+            return
+        }
+
+        relayAccountProfiles.removeAll { $0.id == activeRelayAccountID }
+        persistRelayAccounts()
+        self.activeRelayAccountID = relayAccountProfiles.first?.id
+        if let nextActive = self.activeRelayAccountID {
+            defaults.set(nextActive, forKey: Self.activeRelayAccountIDDefaultsKey)
+        } else {
+            defaults.removeObject(forKey: Self.activeRelayAccountIDDefaultsKey)
+        }
+        applyActiveRelayAccountFields()
+        configurePersistenceForActiveRelayAccount()
+        loadAccountScopedCaches()
+        loadAccountScopedRuntimeSelections()
+        refreshSecureStateForActiveAccountIfNeeded()
         clearTransientConnectionPrompts()
     }
 
@@ -216,7 +230,8 @@ extension CodexService {
         let shouldSuppressMessage = isBenignDisconnect && (!isAppInForeground || !appIsActive)
         let shouldClearSavedRelaySession = shouldClearSavedRelaySession(for: relayCloseCode)
         // Foreground relay drops should reconnect too, otherwise Stop disappears mid-run.
-        let shouldAttemptAutoRecovery = !shouldClearSavedRelaySession
+        let shouldAttemptAutoRecovery = permanentRelayMessage == nil
+            && !shouldClearSavedRelaySession
             && (isRecoverableTransientConnectionError(error) || isBenignDisconnect)
         isConnected = false
         isInitialized = false
@@ -240,8 +255,10 @@ extension CodexService {
         }
         if let permanentRelayMessage {
             lastErrorMessage = permanentRelayMessage
+            markActiveRelayAccountError(permanentRelayMessage)
         } else if !shouldSuppressMessage && !shouldAttemptAutoRecovery {
             lastErrorMessage = error.localizedDescription
+            markActiveRelayAccountError(error.localizedDescription)
         }
         finalizeAllStreamingState()
         endBackgroundRunGraceTask(reason: "receive-error")
@@ -512,6 +529,7 @@ extension CodexService {
         }
 
         lastErrorMessage = message
+        markActiveRelayAccountError(message)
     }
 
     func recoveryStatusMessage(for error: Error) -> String {

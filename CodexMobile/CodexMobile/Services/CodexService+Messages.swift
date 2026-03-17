@@ -1978,20 +1978,10 @@ extension CodexService {
 
     // Keeps stopped-turn lookup thread-local so scroll/render code never rescans full transcripts.
     func rebuildStoppedTurnIDs(for threadId: String, messages: [CodexMessage]) -> Set<String> {
-        let messageStoppedTurnIDs = Set(
+        let stoppedTurnIDs = Set(
             messages.compactMap(\.turnId)
                 .filter { terminalStateByTurnID[$0] == .stopped }
         )
-        let mappedStoppedTurnIDs = Set<String>(
-            threadIdByTurnID.compactMap { turnId, mappedThreadId -> String? in
-                guard mappedThreadId == threadId,
-                      terminalStateByTurnID[turnId] == .stopped else {
-                    return nil
-                }
-                return turnId
-            }
-        )
-        let stoppedTurnIDs = messageStoppedTurnIDs.union(mappedStoppedTurnIDs)
         stoppedTurnIDsByThread[threadId] = stoppedTurnIDs
         return stoppedTurnIDs
     }

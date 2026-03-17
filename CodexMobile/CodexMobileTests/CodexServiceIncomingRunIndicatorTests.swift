@@ -464,10 +464,10 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         )
     }
 
-    func testPermanentRelayCloseClearsSavedPairingAndDisablesReconnect() {
+    func testRelaySessionReplacementClearsSavedPairingAndDisablesReconnect() {
         let service = makeService()
 
-        withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test") {
+        withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test/relay") {
             service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
             service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
             service.isConnected = true
@@ -475,7 +475,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
 
             service.handleReceiveError(
                 CodexServiceError.disconnected,
-                relayCloseCode: .privateCode(4002)
+                relayCloseCode: .privateCode(4001)
             )
 
             XCTAssertFalse(service.isConnected)
@@ -484,19 +484,66 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             XCTAssertNil(service.relayUrl)
             XCTAssertEqual(
                 service.lastErrorMessage,
-                "The Mac session closed. Scan a new QR code to reconnect."
+                "This relay session was replaced by another Mac connection. Scan a new QR code to reconnect."
             )
         }
     }
 
-    func testPermanentRelayAuthCloseKeepsSavedPairingAndDisablesReconnect() {
+    func testMacUnavailableCloseClearsSavedPairingAndDisablesReconnect() {
         let service = makeService()
 
-        withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test") {
+        withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test/relay") {
             service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
             service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
             service.isConnected = true
             service.isInitialized = true
+            service.lastErrorMessage = nil
+            service.setForegroundState(true)
+
+            service.handleReceiveError(
+                CodexServiceError.disconnected,
+                relayCloseCode: .privateCode(4002)
+            )
+
+            XCTAssertFalse(service.isConnected)
+            XCTAssertFalse(service.isInitialized)
+            XCTAssertFalse(service.shouldAutoReconnectOnForeground)
+            XCTAssertNil(service.relaySessionId)
+            XCTAssertNil(service.relayUrl)
+            XCTAssertEqual(
+                service.lastErrorMessage,
+                "This relay pairing is no longer valid. Scan a new QR code to reconnect."
+            )
+            XCTAssertEqual(service.connectionRecoveryState, .idle)
+        }
+    }
+
+    func testReceiveErrorClearsResumedThreadCacheForReconnect() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.resumedThreadIDs = [threadID]
+        service.isConnected = true
+        service.isInitialized = true
+
+        service.handleReceiveError(
+            CodexServiceError.disconnected,
+            relayCloseCode: .privateCode(4002)
+        )
+
+        XCTAssertTrue(service.resumedThreadIDs.isEmpty)
+    }
+
+    func testMacAbsenceBufferOverflowKeepsPairingAndShowsRetryMessage() {
+        let service = makeService()
+
+        withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test/relay") {
+            service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
+            service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
+            service.isConnected = true
+            service.isInitialized = true
+            service.lastErrorMessage = nil
+            service.setForegroundState(true)
 
             service.handleReceiveError(
                 CodexServiceError.disconnected,
@@ -504,14 +551,100 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             )
 
             XCTAssertFalse(service.isConnected)
-            XCTAssertFalse(service.shouldAutoReconnectOnForeground)
-            XCTAssertNotNil(service.relaySessionId)
-            XCTAssertNotNil(service.relayUrl)
+            XCTAssertFalse(service.isInitialized)
+            XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+            XCTAssertEqual(service.connectionRecoveryState, .idle)
+            XCTAssertEqual(service.relaySessionId, SecureStore.readString(for: CodexSecureKeys.relaySessionId))
+            XCTAssertEqual(service.relayUrl, SecureStore.readString(for: CodexSecureKeys.relayUrl))
             XCTAssertEqual(
                 service.lastErrorMessage,
-                "Relay authentication failed. Update the relay key on both the Mac bridge and this app, then tap Retry."
+                "The Mac was temporarily unavailable and this message could not be delivered. Wait a moment, then try again."
             )
         }
+    }
+
+    func testRetryableDisconnectResetsEncryptedSecurityStateBackToTrustedMac() {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+        let macPublicKey = "public-key-\(UUID().uuidString)"
+
+        service.relaySessionId = "session-\(UUID().uuidString)"
+        service.relayUrl = "wss://relay.test/relay"
+        service.relayMacDeviceId = macDeviceID
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: macPublicKey,
+            lastPairedAt: Date()
+        )
+        service.secureConnectionState = .encrypted
+        service.secureMacFingerprint = codexSecureFingerprint(for: macPublicKey)
+        service.isConnected = true
+        service.isInitialized = true
+
+        service.handleReceiveError(NWError.posix(.ECONNABORTED))
+
+        XCTAssertEqual(service.secureConnectionState, .trustedMac)
+        XCTAssertEqual(service.secureMacFingerprint, codexSecureFingerprint(for: macPublicKey))
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+    }
+
+    func testRepeatedTrustedReconnectDisconnectsEscalateToManualRePair() {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+        let macPublicKey = "public-key-\(UUID().uuidString)"
+
+        service.relaySessionId = "session-\(UUID().uuidString)"
+        service.relayUrl = "wss://relay.test/relay"
+        service.relayMacDeviceId = macDeviceID
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: macPublicKey,
+            lastPairedAt: Date()
+        )
+
+        for _ in 0..<3 {
+            service.secureConnectionState = .reconnecting
+            service.handleReceiveError(NWError.posix(.ECONNABORTED))
+        }
+
+        XCTAssertEqual(service.trustedReconnectFailureCount, 3)
+        XCTAssertFalse(service.shouldAutoReconnectOnForeground)
+        XCTAssertEqual(service.connectionRecoveryState, .idle)
+        XCTAssertEqual(service.secureConnectionState, .rePairRequired)
+        XCTAssertEqual(
+            service.lastErrorMessage,
+            "Secure reconnect could not be restored. Scan a new QR code to reconnect."
+        )
+    }
+
+    func testTrustedReconnectHandshakeFailureCounterResetsForFreshPairing() {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+
+        service.relaySessionId = "session-\(UUID().uuidString)"
+        service.relayUrl = "wss://relay.test/relay"
+        service.relayMacDeviceId = macDeviceID
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: "public-key-\(UUID().uuidString)",
+            lastPairedAt: Date()
+        )
+
+        XCTAssertFalse(service.recordTrustedReconnectFailureIfNeeded(isTrustedReconnectAttempt: true))
+        XCTAssertEqual(service.trustedReconnectFailureCount, 1)
+
+        service.rememberRelayPairing(
+            CodexPairingQRPayload(
+                v: codexPairingQRVersion,
+                relay: "wss://relay.test/relay",
+                sessionId: "fresh-session-\(UUID().uuidString)",
+                macDeviceId: macDeviceID,
+                macIdentityPublicKey: "fresh-public-key-\(UUID().uuidString)",
+                expiresAt: Int64(Date().timeIntervalSince1970) + 60
+            )
+        )
+
+        XCTAssertEqual(service.trustedReconnectFailureCount, 0)
     }
 
     func testSavedRelaySessionRequiresBothSessionIdAndRelayURL() {
@@ -522,7 +655,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         service.relaySessionId = "session-1"
         XCTAssertFalse(service.hasSavedRelaySession)
 
-        service.relayUrl = "wss://relay.test"
+        service.relayUrl = "wss://relay.test/relay"
         XCTAssertTrue(service.hasSavedRelaySession)
     }
 
@@ -554,6 +687,79 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(assistantMessages[1].itemId, "item-2")
         XCTAssertEqual(assistantMessages[1].text, "Second")
         XCTAssertTrue(assistantMessages[1].isStreaming)
+    }
+
+    func testAssistantStreamingUpdatesExistingRenderSnapshotText() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        _ = service.timelineState(for: threadID)
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
+        let firstSnapshot = service.timelineState(for: threadID).renderSnapshot
+
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " chunk")
+        let secondSnapshot = service.timelineState(for: threadID).renderSnapshot
+
+        XCTAssertEqual(firstSnapshot.messages.count, 1)
+        XCTAssertEqual(firstSnapshot.messages[0].text, "First")
+        XCTAssertEqual(secondSnapshot.messages.count, 1)
+        XCTAssertEqual(secondSnapshot.messages[0].text, "First chunk")
+        XCTAssertGreaterThan(secondSnapshot.timelineChangeToken, firstSnapshot.timelineChangeToken)
+    }
+
+    func testAssistantStreamingFastPathKeepsCurrentOutputInSync() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        _ = service.timelineState(for: threadID)
+        service.activeThreadId = threadID
+
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " chunk")
+
+        XCTAssertEqual(service.currentOutput, "First chunk")
+    }
+
+    func testAssistantStreamingFallbackKeepsCurrentOutputInSyncWithoutTimelineState() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.activeThreadId = threadID
+
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " chunk")
+
+        XCTAssertEqual(service.currentOutput, "First chunk")
+        XCTAssertEqual(service.timelineState(for: threadID).renderSnapshot.messages.first?.text, "First chunk")
+    }
+
+    func testLateDeltaForOlderAssistantItemDoesNotReplaceLatestOutput() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        _ = service.timelineState(for: threadID)
+        service.activeThreadId = threadID
+
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-2", delta: "Second")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " tail")
+
+        XCTAssertEqual(service.currentOutput, "Second")
+    }
+
+    func testMergeAssistantDeltaKeepsLongReplayOverlapWithoutDuplication() {
+        let service = makeService()
+        let overlap = String(repeating: "a", count: 300)
+        let existing = "prefix-" + overlap
+        let incoming = overlap + "-suffix"
+
+        let merged = service.mergeAssistantDelta(existingText: existing, incomingDelta: incoming)
+
+        XCTAssertEqual(merged, "prefix-" + overlap + "-suffix")
     }
 
     func testMarkTurnCompletedFinalizesAllAssistantItemsForTurn() {

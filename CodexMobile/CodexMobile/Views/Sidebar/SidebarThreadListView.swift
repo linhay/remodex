@@ -24,7 +24,6 @@ struct SidebarThreadListView: View {
     var onDeleteThread: ((CodexThread) -> Void)? = nil
     @AppStorage("sidebar.collapsedProjectGroupIDs") private var collapsedProjectGroupIDsStorage = ""
     @State private var expandedProjectGroupIDs: Set<String> = []
-    @State private var expandedProjectThreadPreviewGroupIDs: Set<String> = []
     @State private var knownProjectGroupIDs: Set<String> = []
     @State private var hasInitializedProjectGroupExpansion = false
     @State private var isArchivedExpanded = false
@@ -83,19 +82,8 @@ struct SidebarThreadListView: View {
 
             if expandedProjectGroupIDs.contains(group.id) {
                 VStack(spacing: 4) {
-                    ForEach(
-                        SidebarProjectThreadPreviewState.visibleThreads(
-                            for: group,
-                            expandedGroupIDs: expandedProjectThreadPreviewGroupIDs
-                        )
-                    ) { thread in
+                    ForEach(group.threads) { thread in
                         threadRow(thread)
-                    }
-                    if SidebarProjectThreadPreviewState.shouldShowExpandToggle(
-                        for: group,
-                        expandedGroupIDs: expandedProjectThreadPreviewGroupIDs
-                    ) {
-                        projectGroupExpandButton(group)
                     }
                 }
                 .padding(.bottom, 14)
@@ -215,7 +203,6 @@ struct SidebarThreadListView: View {
         )
         if expandedProjectGroupIDs.contains(groupID) {
             expandedProjectGroupIDs.remove(groupID)
-            expandedProjectThreadPreviewGroupIDs.remove(groupID)
             persistedCollapsedGroupIDs.insert(groupID)
         } else {
             expandedProjectGroupIDs.insert(groupID)
@@ -256,27 +243,6 @@ struct SidebarThreadListView: View {
            ) {
             expandedProjectGroupIDs.insert(selectedGroupID)
         }
-    }
-
-    private func projectGroupExpandButton(_ group: SidebarThreadGroup) -> some View {
-        let isExpanded = expandedProjectThreadPreviewGroupIDs.contains(group.id)
-        let hiddenCount = max(group.threads.count - SidebarProjectThreadPreviewState.previewLimit, 0)
-
-        return Button {
-            if isExpanded {
-                expandedProjectThreadPreviewGroupIDs.remove(group.id)
-            } else {
-                expandedProjectThreadPreviewGroupIDs.insert(group.id)
-            }
-        } label: {
-            Text(isExpanded ? "Show less" : "Show \(hiddenCount) more")
-                .font(AppFont.caption(weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 4)
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -346,26 +312,5 @@ enum SidebarProjectExpansionState {
             return ""
         }
         return encoded
-    }
-}
-
-enum SidebarProjectThreadPreviewState {
-    static let previewLimit = 5
-
-    static func visibleThreads(
-        for group: SidebarThreadGroup,
-        expandedGroupIDs: Set<String>
-    ) -> [CodexThread] {
-        if expandedGroupIDs.contains(group.id) || group.threads.count <= previewLimit {
-            return group.threads
-        }
-        return Array(group.threads.prefix(previewLimit))
-    }
-
-    static func shouldShowExpandToggle(
-        for group: SidebarThreadGroup,
-        expandedGroupIDs: Set<String>
-    ) -> Bool {
-        group.threads.count > previewLimit || expandedGroupIDs.contains(group.id)
     }
 }

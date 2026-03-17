@@ -5,6 +5,7 @@
 // Depends on: child_process, path, ./rollout-watch
 
 const { execFile } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 
@@ -515,21 +516,30 @@ class CodexDesktopRefresher {
   }
 }
 
-function readBridgeConfig({ env = process.env, platform = process.platform } = {}) {
+function readBridgeConfig({
+  env = process.env,
+  platform = process.platform,
+  runtimeRoot = path.resolve(__dirname, ".."),
+  fsImpl = fs,
+} = {}) {
+  const privateDefaults = readPrivatePackageDefaults({ runtimeRoot, fsImpl });
+  const sourceCheckout = isSourceCheckout(runtimeRoot, fsImpl);
+  const defaultRelayUrl = sourceCheckout
+    ? ""
+    : privateDefaults.relayUrl;
+  const explicitRelayUrl = readFirstDefinedEnv(
+    ["REMODEX_RELAY", "PHODEX_RELAY"],
+    "",
+    env
+  );
   const relayUrl = readFirstDefinedEnv(
     ["REMODEX_RELAY", "PHODEX_RELAY"],
-    "wss://api.phodex.app/relay",
+    defaultRelayUrl,
     env
   );
-  const pairingRelayUrl = readFirstDefinedEnv(
-    ["REMODEX_PAIRING_RELAY", "PHODEX_PAIRING_RELAY"],
-    relayUrl,
-    env
-  );
-  const pairingRelayCandidates = parseRelayCandidates(
-    readFirstDefinedEnv(["REMODEX_RELAY_CANDIDATES", "PHODEX_RELAY_CANDIDATES"], "", env),
-    pairingRelayUrl
-  );
+  const defaultPushServiceUrl = sourceCheckout || explicitRelayUrl
+    ? ""
+    : privateDefaults.pushServiceUrl;
   const codexEndpoint = readFirstDefinedEnv(
     ["REMODEX_CODEX_ENDPOINT", "PHODEX_CODEX_ENDPOINT"],
     "",
@@ -544,15 +554,15 @@ function readBridgeConfig({ env = process.env, platform = process.platform } = {
   // Desktop refresh is opt-in for now because Codex.app still lacks true live updates.
   const defaultRefreshEnabled = false;
   return {
-    // Where the Mac bridge connects as the "mac" WebSocket client.
     relayUrl,
-    // What is encoded into the QR/pairing payload for the iPhone to choose from.
-    pairingRelayUrl,
-    pairingRelayCandidates,
-    relayAuthKey: readFirstDefinedEnv(
-      ["REMODEX_RELAY_KEY", "PHODEX_RELAY_KEY"],
-      "",
+    pushServiceUrl: readFirstDefinedEnv(
+      ["REMODEX_PUSH_SERVICE_URL"],
+      defaultPushServiceUrl,
       env
+    ),
+    pushPreviewMaxChars: parseIntegerEnv(
+      readFirstDefinedEnv(["REMODEX_PUSH_PREVIEW_MAX_CHARS"], "160", env),
+      160
     ),
     refreshEnabled: explicitRefreshEnabled == null
       ? defaultRefreshEnabled
@@ -568,28 +578,34 @@ function readBridgeConfig({ env = process.env, platform = process.platform } = {
   };
 }
 
-function parseRelayCandidates(rawValue, fallbackRelayUrl) {
-  const candidates = [];
-  const seen = new Set();
+function readPrivatePackageDefaults({ runtimeRoot, fsImpl }) {
+  const defaultsPath = path.join(runtimeRoot, "src", "private-defaults.json");
+  if (!fsImpl.existsSync(defaultsPath)) {
+    return {
+      relayUrl: "",
+      pushServiceUrl: "",
+    };
+  }
 
-  const addCandidate = (value) => {
-    if (typeof value !== "string") {
-      return;
-    }
-    const normalized = value.trim().replace(/\/+$/, "");
-    if (!normalized || seen.has(normalized)) {
-      return;
-    }
-    seen.add(normalized);
-    candidates.push(normalized);
-  };
+  try {
+    const parsed = safeParseJSON(fsImpl.readFileSync(defaultsPath, "utf8"));
+    return {
+      relayUrl: readString(parsed?.relayUrl) || "",
+      pushServiceUrl: readString(parsed?.pushServiceUrl) || "",
+    };
+  } catch {
+    return {
+      relayUrl: "",
+      pushServiceUrl: "",
+    };
+  }
+}
 
-  addCandidate(fallbackRelayUrl);
-  rawValue
-    .split(",")
-    .forEach((candidate) => addCandidate(candidate));
-
-  return candidates;
+// Keeps repo checkouts local-first while published npm installs can stay ready-to-run.
+function isSourceCheckout(runtimeRoot, fsImpl) {
+  const repoRoot = path.resolve(runtimeRoot, "..");
+  return path.basename(runtimeRoot) === "phodex-bridge"
+    && fsImpl.existsSync(path.join(repoRoot, ".git"));
 }
 
 function execFilePromise(command, args) {
@@ -612,6 +628,10 @@ function safeParseJSON(value) {
   } catch {
     return null;
   }
+}
+
+function readString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
 function extractTurnId(message) {

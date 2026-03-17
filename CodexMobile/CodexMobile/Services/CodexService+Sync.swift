@@ -128,12 +128,12 @@ extension CodexService {
         }
 
         do {
-            let activeThreads = try await fetchServerThreads()
+            let activeThreads = try await fetchServerThreads(limit: recentThreadListLimit)
 
             // Also fetch server-archived threads so they survive app restarts.
             var archivedThreads: [CodexThread] = []
             do {
-                archivedThreads = try await fetchServerThreads(archived: true)
+                archivedThreads = try await fetchServerThreads(limit: recentThreadListLimit, archived: true)
             } catch {
                 debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
             }
@@ -648,28 +648,28 @@ extension CodexService {
     private static let locallyDeletedThreadIDsKey = "codex.locallyDeletedThreadIDs"
 
     var locallyArchivedThreadIDs: Set<String> {
-        Set(defaults.stringArray(forKey: accountScopedDefaultsKey(Self.locallyArchivedThreadIDsKey)) ?? [])
+        Set(defaults.stringArray(forKey: Self.locallyArchivedThreadIDsKey) ?? [])
     }
 
     var locallyDeletedThreadIDs: Set<String> {
-        Set(defaults.stringArray(forKey: accountScopedDefaultsKey(Self.locallyDeletedThreadIDsKey)) ?? [])
+        Set(defaults.stringArray(forKey: Self.locallyDeletedThreadIDsKey) ?? [])
     }
 
     private func addLocallyArchivedThreadID(_ threadId: String) {
         var ids = locallyArchivedThreadIDs
         ids.insert(threadId)
-        defaults.set(Array(ids), forKey: accountScopedDefaultsKey(Self.locallyArchivedThreadIDsKey))
+        defaults.set(Array(ids), forKey: Self.locallyArchivedThreadIDsKey)
     }
 
     private func removeLocallyArchivedThreadID(_ threadId: String) {
         var ids = locallyArchivedThreadIDs
         ids.remove(threadId)
-        defaults.set(Array(ids), forKey: accountScopedDefaultsKey(Self.locallyArchivedThreadIDsKey))
+        defaults.set(Array(ids), forKey: Self.locallyArchivedThreadIDsKey)
     }
 
     private func addLocallyDeletedThreadID(_ threadId: String) {
         var ids = locallyDeletedThreadIDs
         ids.insert(threadId)
-        defaults.set(Array(ids), forKey: accountScopedDefaultsKey(Self.locallyDeletedThreadIDsKey))
+        defaults.set(Array(ids), forKey: Self.locallyDeletedThreadIDsKey)
     }
 }

@@ -29,40 +29,29 @@ const HANDSHAKE_MODE_QR_BOOTSTRAP = "qr_bootstrap";
 const HANDSHAKE_MODE_TRUSTED_RECONNECT = "trusted_reconnect";
 const SECURE_SENDER_MAC = "mac";
 const SECURE_SENDER_IPHONE = "iphone";
-const DEFAULT_PAIRING_AGE_MS = 30 * 60 * 1000;
-// Maximum valid JS Date timestamp so qr.js can always print ISO expiry.
-const NEVER_EXPIRES_TIMESTAMP_MS = 8_640_000_000_000_000;
+const MAX_PAIRING_AGE_MS = 5 * 60 * 1000;
 const MAX_BRIDGE_OUTBOUND_MESSAGES = 500;
 const MAX_BRIDGE_OUTBOUND_BYTES = 10 * 1024 * 1024;
 
-function createBridgeSecureTransport({
-  sessionId,
-  relayUrl,
-  relayCandidates = [],
-  relayAuthKey = "",
-  deviceState,
-}) {
-  const pairingExpiryConfig = resolvePairingExpiryConfig(process.env);
-  const normalizedRelayCandidates = normalizeRelayCandidates(relayUrl, relayCandidates);
+function createBridgeSecureTransport({ sessionId, relayUrl, deviceState }) {
   let currentDeviceState = deviceState;
   let pendingHandshake = null;
   let activeSession = null;
   let liveSendWireMessage = null;
-  // Highest bridge seq definitely acked by phone via resumeState.
+  // Tracks the highest bridge seq the phone has definitely acked, so replay
+  // decisions never depend on best-effort local socket writes.
   let lastRelayedBridgeOutboundSeq = 0;
-  let currentPairingExpiresAt = computePairingExpiresAt(pairingExpiryConfig);
+  let currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
   let nextKeyEpoch = 1;
   let nextBridgeOutboundSeq = 1;
   let outboundBufferBytes = 0;
   const outboundBuffer = [];
 
   function createPairingPayload() {
-    currentPairingExpiresAt = computePairingExpiresAt(pairingExpiryConfig);
+    currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
     return {
       v: PAIRING_QR_VERSION,
       relay: relayUrl,
-      relayCandidates: normalizedRelayCandidates,
-      relayAuthKey: relayAuthKey || undefined,
       sessionId,
       macDeviceId: currentDeviceState.macDeviceId,
       macIdentityPublicKey: currentDeviceState.macIdentityPublicKey,
@@ -134,14 +123,6 @@ function createBridgeSecureTransport({
     return Boolean(activeSession?.isResumed);
   }
 
-  // Rejects QR bootstraps from a second iPhone unless it is the already-trusted device.
-  function hasConflictingTrustedPhone(phoneDeviceId, phoneIdentityPublicKey) {
-    const trustedPhones = currentDeviceState.trustedPhones || {};
-    return Object.entries(trustedPhones).some(([trustedDeviceId, trustedPublicKey]) => (
-      trustedDeviceId !== phoneDeviceId || trustedPublicKey !== phoneIdentityPublicKey
-    ));
-  }
-
   function handleClientHello(message, sendControlMessage) {
     const protocolVersion = Number(message.protocolVersion);
     const incomingSessionId = normalizeNonEmptyString(message.sessionId);
@@ -184,14 +165,6 @@ function createBridgeSecureTransport({
     }
 
     const trustedPhonePublicKey = getTrustedPhonePublicKey(currentDeviceState, phoneDeviceId);
-    if (handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP && hasConflictingTrustedPhone(phoneDeviceId, phoneIdentityPublicKey)) {
-      sendControlMessage(createSecureError({
-        code: "phone_replacement_required",
-        message: "This Mac is already paired with another iPhone. Reset pairing on the Mac before pairing a new phone.",
-      }));
-      return;
-    }
-
     if (handshakeMode === HANDSHAKE_MODE_TRUSTED_RECONNECT) {
       if (!trustedPhonePublicKey) {
         sendControlMessage(createSecureError({
@@ -375,6 +348,7 @@ function createBridgeSecureTransport({
       pendingHandshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP
       || getTrustedPhonePublicKey(currentDeviceState, pendingHandshake.phoneDeviceId)
     ) {
+      // Lock the trusted phone identity so later reconnects can be verified cleanly.
       currentDeviceState = rememberTrustedPhone(
         currentDeviceState,
         pendingHandshake.phoneDeviceId,
@@ -522,6 +496,8 @@ function createBridgeSecureTransport({
     );
   }
 
+  // Replays from the last phone ack instead of local socket writes, so a relay
+  // flap cannot make the bridge skip output the phone never actually received.
   function replayBufferedOutboundMessages() {
     if (!activeSession?.isResumed || typeof activeSession.sendWireMessage !== "function") {
       return;
@@ -543,28 +519,6 @@ function createBridgeSecureTransport({
     isSecureChannelReady,
     queueOutboundApplicationMessage,
   };
-}
-
-function normalizeRelayCandidates(primaryRelayUrl, candidates) {
-  const result = [];
-  const seen = new Set();
-  const add = (value) => {
-    if (typeof value !== "string") {
-      return;
-    }
-    const normalized = value.trim().replace(/\/+$/, "");
-    if (!normalized || seen.has(normalized)) {
-      return;
-    }
-    seen.add(normalized);
-    result.push(normalized);
-  };
-
-  add(primaryRelayUrl);
-  if (Array.isArray(candidates)) {
-    candidates.forEach((candidate) => add(candidate));
-  }
-  return result;
 }
 
 function debugSecureLog(message) {
@@ -760,31 +714,6 @@ function base64UrlToBase64(value) {
 
 function base64ToBase64Url(value) {
   return value.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function resolvePairingExpiryConfig(env) {
-  const raw = normalizeNonEmptyString(env?.REMODEX_PAIRING_TTL_MS).toLowerCase();
-  if (!raw) {
-    return { neverExpires: false, ttlMs: DEFAULT_PAIRING_AGE_MS };
-  }
-
-  if (raw === "never") {
-    return { neverExpires: true, ttlMs: 0 };
-  }
-
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return { neverExpires: false, ttlMs: DEFAULT_PAIRING_AGE_MS };
-  }
-
-  return { neverExpires: false, ttlMs: parsed };
-}
-
-function computePairingExpiresAt(config) {
-  if (config.neverExpires) {
-    return NEVER_EXPIRES_TIMESTAMP_MS;
-  }
-  return Date.now() + config.ttlMs;
 }
 
 module.exports = {

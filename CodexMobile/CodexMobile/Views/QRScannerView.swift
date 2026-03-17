@@ -6,324 +6,243 @@
 
 import AVFoundation
 import SwiftUI
-import UIKit
 
 struct QRScannerView: View {
     let onScan: (CodexPairingQRPayload) -> Void
 
-    @Environment(\.scenePhase) private var scenePhase
-    @State private var viewModel = QRScannerViewModel()
+    @State private var scannerError: String?
+    @State private var bridgeUpdatePrompt: CodexBridgeUpdatePrompt?
+    @State private var didCopyBridgeUpdateCommand = false
+    @State private var hasCameraPermission = false
+    @State private var isCheckingPermission = true
+
+    init(
+        initialBridgeUpdatePrompt: CodexBridgeUpdatePrompt? = nil,
+        initialHasCameraPermission: Bool = false,
+        initialIsCheckingPermission: Bool = true,
+        onScan: @escaping (CodexPairingQRPayload) -> Void
+    ) {
+        self.onScan = onScan
+        _bridgeUpdatePrompt = State(initialValue: initialBridgeUpdatePrompt)
+        _hasCameraPermission = State(initialValue: initialHasCameraPermission)
+        _isCheckingPermission = State(initialValue: initialIsCheckingPermission)
+    }
 
     var body: some View {
-        @Bindable var viewModel = viewModel
-
         ZStack {
-            LinearGradient(
-                colors: [
-                    Color(.systemBackground),
-                    Color(.secondarySystemBackground),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
+            Color.black.ignoresSafeArea()
 
-            if viewModel.isCheckingPermission {
+            if isCheckingPermission {
                 ProgressView()
-                    .tint(.primary)
-            } else if viewModel.hasCameraPermission {
-                scannerContent
+                    .tint(.white)
+            } else if let bridgeUpdatePrompt {
+                bridgeUpdateView(prompt: bridgeUpdatePrompt)
+            } else if hasCameraPermission {
+                QRCameraPreview { code, resetScanLock in
+                    handleScanResult(code, resetScanLock: resetScanLock)
+                }
+                .ignoresSafeArea()
+
+                scannerOverlay
             } else {
                 cameraPermissionView
             }
         }
-        .sheet(isPresented: $viewModel.isShowingManualEntry) {
-            manualEntrySheet
-        }
-        .onChange(of: viewModel.isShowingManualEntry) { _, isPresented in
-            if !isPresented {
-                viewModel.clearManualEntry()
-            }
-        }
         .task {
             await checkCameraPermission()
-            attemptSimulatorClipboardPairing()
         }
         .alert("Scan Error", isPresented: Binding(
-            get: { viewModel.scannerError != nil },
-            set: { if !$0 { viewModel.scannerError = nil } }
+            get: { scannerError != nil },
+            set: { if !$0 { scannerError = nil } }
         )) {
-            Button("OK", role: .cancel) { viewModel.scannerError = nil }
+            Button("OK", role: .cancel) { scannerError = nil }
         } message: {
-            Text(viewModel.scannerError ?? "Invalid QR code")
+            Text(scannerError ?? "Invalid QR code")
         }
     }
 
-    private var isCameraSessionActive: Bool {
-        QRScannerCameraSessionPolicy.shouldRunCameraSession(
-            hasCameraPermission: viewModel.hasCameraPermission,
-            isShowingManualEntry: viewModel.isShowingManualEntry,
-            scenePhase: scenePhase
-        )
-    }
+    // Blocks repeated scans when the camera spots a bridge QR from an incompatible npm release.
+    private func bridgeUpdateView(prompt: CodexBridgeUpdatePrompt) -> some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Spacer()
 
-    private var scannerContent: some View {
-        GeometryReader { geometry in
-            let width = min(geometry.size.width - 32, 420)
-            let scannerHeight = min(max(geometry.size.height * 0.5, 320), 520)
-
-            VStack(spacing: 16) {
-                headerCard
-
-                ZStack {
-                    QRCameraPreview(
-                        isSessionActive: isCameraSessionActive,
-                        onScan: { code, resetScanLock in
-                            handleScanResult(code, resetScanLock: resetScanLock)
-                        }
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-
-                    RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .stroke(Color.white.opacity(0.25), lineWidth: 1)
-
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(Color.white.opacity(0.85), style: StrokeStyle(lineWidth: 2, dash: [10, 8]))
-                        .frame(width: min(width * 0.68, 260), height: min(width * 0.68, 260))
-
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Text("Align the full QR code in frame")
-                                .font(AppFont.caption(weight: .medium))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(.black.opacity(0.45), in: Capsule())
-                            Spacer()
-                        }
-                        .padding(14)
-                    }
-                }
-                .frame(width: width, height: scannerHeight)
-                .shadow(color: Color.black.opacity(0.18), radius: 18, y: 10)
-
-                actionStrip
-                    .frame(width: width)
-
-                Spacer(minLength: 12)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .padding(.top, 14)
-            .padding(.horizontal, 16)
-        }
-    }
-
-    private var headerCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Pair Your Mac")
+            VStack(alignment: .leading, spacing: 12) {
+                Text(prompt.title)
                     .font(AppFont.title3(weight: .semibold))
-                Spacer()
-                Text("Secure")
-                    .font(AppFont.caption(weight: .semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .foregroundStyle(.green)
-                    .background(Color.green.opacity(0.12), in: Capsule())
+                    .foregroundStyle(.white)
+
+                Text(prompt.message)
+                    .font(AppFont.body())
+                    .foregroundStyle(.white.opacity(0.82))
             }
 
-            Text("Scan the QR code shown by `remodex up` on your Mac.")
-                .font(AppFont.subheadline())
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Do these steps on your Mac")
+                    .font(AppFont.caption(weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+
+                bridgeUpdateStep(number: "1", title: "Update Remodex", detail: prompt.command, showsCopyButton: true)
+                bridgeUpdateStep(number: "2", title: "Start it again", detail: "Run remodex up")
+                bridgeUpdateStep(number: "3", title: "Make a new QR code", detail: "Use the new QR shown in the terminal")
+                bridgeUpdateStep(number: "4", title: "Come back here", detail: "Then scan the new QR code from the iPhone")
+            }
+
+            Button("I Updated It") {
+                bridgeUpdatePrompt = nil
+                didCopyBridgeUpdateCommand = false
+            }
+            .font(AppFont.body(weight: .semibold))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .foregroundStyle(.black)
+            .background(.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .buttonStyle(.plain)
+
+            Spacer()
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(.tertiarySystemFill).opacity(0.55))
-        )
+        .padding(.horizontal, 24)
     }
 
-    private var actionStrip: some View {
-        HStack(spacing: 10) {
-            Button {
-                viewModel.isShowingManualEntry = true
-            } label: {
-                Label("Use Pairing Code", systemImage: "keyboard")
-                    .font(AppFont.subheadline(weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-            }
-            .buttonStyle(.bordered)
+    private func bridgeUpdateStep(
+        number: String,
+        title: String,
+        detail: String,
+        showsCopyButton: Bool = false
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(number)
+                .font(AppFont.caption2(weight: .bold))
+                .foregroundStyle(.black)
+                .frame(width: 20, height: 20)
+                .background(.white, in: Circle())
+                .padding(.top, 2)
 
-            Button {
-                attemptSimulatorClipboardPairing()
-            } label: {
-                Label("Paste", systemImage: "doc.on.clipboard")
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
                     .font(AppFont.subheadline(weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
+                    .foregroundStyle(.white)
+
+                Text(detail)
+                    .font(showsCopyButton ? AppFont.mono(.caption) : AppFont.caption())
+                    .foregroundStyle(.white.opacity(0.82))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.white.opacity(0.08))
+                    )
+
+                if showsCopyButton {
+                    Button(didCopyBridgeUpdateCommand ? "Copied" : "Copy Command") {
+                        UIPasteboard.general.string = detail
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            didCopyBridgeUpdateCommand = true
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                didCopyBridgeUpdateCommand = false
+                            }
+                        }
+                    }
+                    .font(AppFont.caption(weight: .semibold))
+                    .foregroundStyle(.white)
+                    .buttonStyle(.plain)
+                }
             }
-            .buttonStyle(.borderedProminent)
+        }
+    }
+
+    private var scannerOverlay: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            RoundedRectangle(cornerRadius: 20)
+                .stroke(Color.white.opacity(0.6), lineWidth: 2)
+                .frame(width: 250, height: 250)
+
+            Text("Scan QR code from Remodex CLI")
+                .font(AppFont.subheadline(weight: .medium))
+                .foregroundStyle(.white)
+
+            Spacer()
         }
     }
 
     private var cameraPermissionView: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "camera.viewfinder")
-                .font(.system(size: 46, weight: .medium))
+        VStack(spacing: 20) {
+            Image(systemName: "camera.fill")
+                .font(.system(size: 48))
                 .foregroundStyle(.secondary)
 
-            Text("Camera Access Needed")
+            Text("Camera access needed")
                 .font(AppFont.title3(weight: .semibold))
-                .foregroundStyle(.primary)
+                .foregroundStyle(.white)
 
-            Text("Enable camera permission in iOS Settings, or continue with manual pairing code.")
+            Text("Open Settings and allow camera access to scan the pairing QR code.")
                 .font(AppFont.subheadline())
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 20)
+                .padding(.horizontal, 40)
 
-            HStack(spacing: 10) {
-                Button("Open Settings") {
-                    if let url = URL(string: UIApplication.openSettingsURLString) {
-                        UIApplication.shared.open(url)
-                    }
+            Button("Open Settings") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
                 }
-                .buttonStyle(.borderedProminent)
-
-                Button("Use Pairing Code") {
-                    viewModel.isShowingManualEntry = true
-                }
-                .buttonStyle(.bordered)
             }
+            .buttonStyle(.borderedProminent)
         }
-        .padding(22)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color(.tertiarySystemFill).opacity(0.6))
-        )
-        .padding(.horizontal, 20)
     }
 
     private func checkCameraPermission() async {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         switch status {
         case .authorized:
-            viewModel.hasCameraPermission = true
+            hasCameraPermission = true
         case .notDetermined:
-            viewModel.hasCameraPermission = await AVCaptureDevice.requestAccess(for: .video)
+            hasCameraPermission = await AVCaptureDevice.requestAccess(for: .video)
         default:
-            viewModel.hasCameraPermission = false
+            hasCameraPermission = false
         }
-        viewModel.isCheckingPermission = false
+        isCheckingPermission = false
     }
 
     private func handleScanResult(_ code: String, resetScanLock: @escaping () -> Void) {
-        do {
-            onScan(try decodePairingPayload(from: code))
-        } catch {
-            viewModel.scannerError = error.localizedDescription
+        switch validatePairingQRCode(code) {
+        case .success(let payload):
+            onScan(payload)
+        case .scanError(let message):
+            scannerError = message
+            resetScanLock()
+        case .bridgeUpdateRequired(let prompt):
+            didCopyBridgeUpdateCommand = false
+            bridgeUpdatePrompt = prompt
             resetScanLock()
         }
     }
-
-    private var manualEntrySheet: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Paste the full pairing payload printed by `remodex up`.")
-                    .font(AppFont.subheadline())
-                    .foregroundStyle(.secondary)
-
-                TextEditor(text: $viewModel.manualEntryText)
-                    .font(AppFont.mono(.caption))
-                    .padding(12)
-                    .frame(minHeight: 210)
-                    .background(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(Color(.secondarySystemBackground))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(Color(.separator), lineWidth: 1)
-                    )
-
-                HStack(spacing: 10) {
-                    Button("Paste from Clipboard") {
-                        viewModel.manualEntryText = UIPasteboard.general.string ?? ""
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("Connect") {
-                        submitManualEntry()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!viewModel.canSubmitManualEntry)
-                }
-
-                Spacer()
-            }
-            .padding(20)
-            .navigationTitle("Pairing Code")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Close") {
-                        viewModel.dismissManualEntry()
-                    }
-                }
-            }
-        }
-    }
-
-    private func submitManualEntry() {
-        do {
-            let payload = try decodePairingPayload(from: viewModel.manualEntryText)
-            viewModel.dismissManualEntry()
-            onScan(payload)
-        } catch {
-            viewModel.scannerError = error.localizedDescription
-        }
-    }
-
-    private func decodePairingPayload(from rawValue: String) throws -> CodexPairingQRPayload {
-        try CodexPairingQRPayload.parse(from: rawValue)
-    }
-
-    private func attemptSimulatorClipboardPairing() {
-        guard let clipboardValue = UIPasteboard.general.string else {
-            return
-        }
-
-        #if targetEnvironment(simulator)
-        guard let payload = try? decodePairingPayload(from: clipboardValue) else {
-            return
-        }
-        onScan(payload)
-        #else
-        if let payload = try? decodePairingPayload(from: clipboardValue) {
-            onScan(payload)
-        } else {
-            viewModel.scannerError = "Clipboard does not contain a valid pairing payload."
-        }
-        #endif
-    }
 }
 
-enum QRScannerCameraSessionPolicy {
-    static func shouldRunCameraSession(
-        hasCameraPermission: Bool,
-        isShowingManualEntry: Bool,
-        scenePhase: ScenePhase
-    ) -> Bool {
-        hasCameraPermission && !isShowingManualEntry && scenePhase == .active
-    }
+private extension CodexBridgeUpdatePrompt {
+    static let previewScannerMismatch = CodexBridgeUpdatePrompt(
+        title: "Update Remodex on your Mac before scanning",
+        message: "This QR code was generated by a different Remodex npm version. Update the package on your Mac to the latest release before scanning a new QR code.",
+        command: "npm install -g remodex@latest"
+    )
+}
+
+// MARK: - Preview
+
+#Preview("Bridge Update Required") {
+    QRScannerView(
+        initialBridgeUpdatePrompt: .previewScannerMismatch,
+        initialIsCheckingPermission: false
+    ) { _ in }
 }
 
 // MARK: - Camera Preview UIViewRepresentable
 
 private struct QRCameraPreview: UIViewRepresentable {
-    let isSessionActive: Bool
     let onScan: (String, _ resetScanLock: @escaping () -> Void) -> Void
 
     func makeUIView(context: Context) -> QRCameraUIView {
@@ -333,13 +252,10 @@ private struct QRCameraPreview: UIViewRepresentable {
                 view?.resetScanLock()
             }
         }
-        view.setSessionRunning(isSessionActive)
         return view
     }
 
-    func updateUIView(_ uiView: QRCameraUIView, context: Context) {
-        uiView.setSessionRunning(isSessionActive)
-    }
+    func updateUIView(_ uiView: QRCameraUIView, context: Context) {}
 }
 
 private class QRCameraUIView: UIView, AVCaptureMetadataOutputObjectsDelegate {
@@ -387,6 +303,9 @@ private class QRCameraUIView: UIView, AVCaptureMetadataOutputObjectsDelegate {
         self.layer.addSublayer(layer)
         previewLayer = layer
 
+        sessionQueue.async { [weak self] in
+            self?.captureSession.startRunning()
+        }
     }
 
     func metadataOutput(
@@ -410,27 +329,10 @@ private class QRCameraUIView: UIView, AVCaptureMetadataOutputObjectsDelegate {
         hasScanned = false
     }
 
-    func setSessionRunning(_ isRunning: Bool) {
-        let session = captureSession
-        sessionQueue.async { [weak self] in
-            guard let self else { return }
-            if isRunning {
-                if !session.isRunning {
-                    session.startRunning()
-                }
-                self.hasScanned = false
-            } else if session.isRunning {
-                session.stopRunning()
-            }
-        }
-    }
-
     deinit {
         let session = captureSession
         sessionQueue.async {
-            if session.isRunning {
-                session.stopRunning()
-            }
+            session.stopRunning()
         }
     }
 }

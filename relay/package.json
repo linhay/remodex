@@ -1,17 +1,12 @@
 {
   "name": "remodex-relay",
   "private": true,
-  "version": "0.0.0",
-  "type": "module",
+  "type": "commonjs",
   "scripts": {
-    "start": "node ./server.cjs",
-    "deploy": "wrangler deploy",
-    "deploy:dry-run": "wrangler deploy --dry-run"
+    "start": "node ./server.js",
+    "test": "node --test ./*.test.js"
   },
   "dependencies": {
     "ws": "^8.19.0"
-  },
-  "devDependencies": {
-    "wrangler": "^4.57.1"
   }
 }

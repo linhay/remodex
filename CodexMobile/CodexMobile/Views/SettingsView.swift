@@ -5,140 +5,15 @@
 
 import SwiftUI
 import UIKit
-import Network
-
-enum RelaySourceProbeState: Equatable {
-    case probing
-    case reachable(latencyMs: Int)
-    case unreachable
-
-    static func probingStates(for sources: [String]) -> [String: RelaySourceProbeState] {
-        Dictionary(uniqueKeysWithValues: sources.map { ($0, RelaySourceProbeState.probing) })
-    }
-
-    var statusText: String {
-        switch self {
-        case .probing:
-            return "探测中..."
-        case .reachable(let latencyMs):
-            return "可达 · \(latencyMs)ms"
-        case .unreachable:
-            return "不可达"
-        }
-    }
-}
 
 struct SettingsView: View {
     @Environment(CodexService.self) private var codex
 
+    @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
+
     private let runtimeAutoValue = "__AUTO__"
     private let runtimeNormalValue = "__NORMAL__"
     private let settingsAccentColor = Color(.plan)
-    private let networkPathMonitorQueue = DispatchQueue(label: "CodexMobile.Settings.NetworkPath")
-
-    @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
-    @State private var contentViewModel = ContentViewModel()
-    @State private var probeStateBySource: [String: RelaySourceProbeState] = [:]
-    @State private var usesCellularInterface = false
-    @State private var networkPathMonitor: NWPathMonitor?
-    @State private var isShowingAddAccountScanner = false
-    @State private var renamingAccountID: String?
-    @State private var pendingAccountDisplayName = ""
-    @State private var deletingAccountID: String?
-
-    private var appFontStyleBinding: Binding<AppFont.Style> {
-        Binding(
-            get: { AppFont.Style(rawValue: appFontStyleRawValue) ?? AppFont.defaultStyle },
-            set: { appFontStyleRawValue = $0.rawValue }
-        )
-    }
-
-    private var connectionPhaseShowsProgress: Bool {
-        switch codex.connectionPhase {
-        case .connecting, .loadingChats, .syncing:
-            return true
-        case .offline, .connected:
-            return false
-        }
-    }
-
-    private var connectionStatusLabel: String {
-        switch codex.connectionPhase {
-        case .offline:
-            return "offline"
-        case .connecting:
-            return "connecting"
-        case .loadingChats:
-            return "loading chats"
-        case .syncing:
-            return "syncing"
-        case .connected:
-            return "connected"
-        }
-    }
-
-    private var connectionProgressLabel: String {
-        switch codex.connectionPhase {
-        case .connecting:
-            return "Connecting to relay..."
-        case .loadingChats:
-            return "Loading chats..."
-        case .syncing:
-            return "Syncing workspace..."
-        case .offline, .connected:
-            return ""
-        }
-    }
-
-    private var connectionDomainLabel: String {
-        SettingsConnectionDomainFormatter.domainLabel(from: connectionDisplayURL)
-    }
-
-    private var connectionDomainTitle: String {
-        codex.isConnected ? "Connected via" : "Preferred source"
-    }
-
-    private var connectionDisplayURL: String? {
-        SettingsConnectionDisplayResolver.displayURL(
-            isConnected: codex.isConnected,
-            connectedServerIdentity: codex.connectedServerIdentity,
-            selectedRelayBaseURL: codex.selectedRelayBaseURL,
-            fallbackRelayURL: codex.normalizedRelayURL
-        )
-    }
-
-    private var localRelayHintText: String? {
-        SettingsLocalNetworkHintFormatter.hintText(
-            hasCellularInterface: usesCellularInterface,
-            hasReachableOrCurrentLocalRelay: hasReachableOrCurrentLocalRelay
-        )
-    }
-
-    private var hasReachableOrCurrentLocalRelay: Bool {
-        for source in codex.normalizedRelayBaseURLsForReconnect where contentViewModel.isLikelyLANRelayURL(source) {
-            if isCurrentConnectedSource(source) {
-                return true
-            }
-            if case .reachable = (probeStateBySource[source] ?? .unreachable) {
-                return true
-            }
-        }
-        return false
-    }
-
-    private var isRenamingAccountBinding: Binding<Bool> {
-        Binding(
-            get: { renamingAccountID != nil },
-            set: { if !$0 { renamingAccountID = nil } }
-        )
-    }
-
-    private var isDeletingAccountBinding: Binding<Bool> {
-        Binding(
-            get: { deletingAccountID != nil },
-            set: { if !$0 { deletingAccountID = nil } }
-        )
-    }
 
     var body: some View {
         ScrollView {
@@ -154,66 +29,18 @@ struct SettingsView: View {
         }
         .font(AppFont.body())
         .navigationTitle("Settings")
-        .task {
-            await refreshRelaySourceProbeStates()
-        }
-        .onAppear {
-            startNetworkPathMonitor()
-        }
-        .onDisappear {
-            stopNetworkPathMonitor()
-        }
-        .onChange(of: codex.normalizedRelayBaseURLsForReconnect) { _, _ in
-            Task { @MainActor in
-                await refreshRelaySourceProbeStates()
-            }
-        }
-        .sheet(isPresented: $isShowingAddAccountScanner) {
-            NavigationStack {
-                QRScannerView { pairingPayload in
-                    Task { @MainActor in
-                        isShowingAddAccountScanner = false
-                        await contentViewModel.connectToRelay(
-                            pairingPayload: pairingPayload,
-                            codex: codex
-                        )
-                        await refreshRelaySourceProbeStates()
-                    }
-                }
-            }
-        }
-        .alert("Rename Account", isPresented: isRenamingAccountBinding) {
-            TextField("Account name", text: $pendingAccountDisplayName)
-            Button("Save") {
-                guard let renamingAccountID else { return }
-                codex.renameRelayAccount(id: renamingAccountID, displayName: pendingAccountDisplayName)
-                self.renamingAccountID = nil
-            }
-            Button("Cancel", role: .cancel) {
-                renamingAccountID = nil
-            }
-        } message: {
-            Text("Use a clear name for this pairing profile.")
-        }
-        .confirmationDialog("Delete Account", isPresented: isDeletingAccountBinding) {
-            Button("Delete", role: .destructive) {
-                guard let deletingAccountID else { return }
-                _ = codex.deleteRelayAccount(id: deletingAccountID)
-                self.deletingAccountID = nil
-            }
-            Button("Cancel", role: .cancel) {
-                deletingAccountID = nil
-            }
-        } message: {
-            Text("This only removes the saved pairing profile.")
-        }
     }
-}
 
-// MARK: - Subviews
+    private var appFontStyleBinding: Binding<AppFont.Style> {
+        Binding(
+            get: { AppFont.Style(rawValue: appFontStyleRawValue) ?? AppFont.defaultStyle },
+            set: { appFontStyleRawValue = $0.rawValue }
+        )
+    }
 
-private extension SettingsView {
-    @ViewBuilder var runtimeDefaultsSection: some View {
+    // MARK: - Runtime defaults
+
+    @ViewBuilder private var runtimeDefaultsSection: some View {
         SettingsCard(title: "Runtime defaults") {
             HStack {
                 Text("Model")
@@ -274,29 +101,13 @@ private extension SettingsView {
         }
     }
 
-    @ViewBuilder var connectionSection: some View {
+    // MARK: - Connection
+
+    @ViewBuilder private var connectionSection: some View {
         SettingsCard(title: "Connection") {
             Text("Status: \(connectionStatusLabel)")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
-
-            Text("\(connectionDomainTitle): \(connectionDomainLabel)")
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-
-            relayAccountsSection
-            relaySourceHeader
-            relaySourcesList
-
-            Text(SettingsReconnectHintFormatter.hintText())
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-
-            if let localRelayHintText {
-                Text(localRelayHintText)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
 
             Text("Security: \(codex.secureConnectionState.statusLabel)")
                 .font(AppFont.caption())
@@ -324,12 +135,6 @@ private extension SettingsView {
                     .foregroundStyle(.secondary)
             }
 
-            if let autoSwitchRecord = codex.relayAutoSwitchRecord {
-                Text(SettingsAutoSwitchStatusFormatter.statusText(record: autoSwitchRecord))
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
-
             if let error = codex.lastErrorMessage, !error.isEmpty {
                 Text(error)
                     .font(AppFont.caption())
@@ -345,247 +150,65 @@ private extension SettingsView {
         }
     }
 
-    @ViewBuilder var relaySourcesList: some View {
-        if codex.normalizedRelayBaseURLsForReconnect.isEmpty {
-            Text("No relay source configured.")
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-        } else {
-            VStack(spacing: 8) {
-                ForEach(codex.normalizedRelayBaseURLsForReconnect, id: \.self) { source in
-                    relaySourceRow(source)
-                }
-            }
+    private var connectionPhaseShowsProgress: Bool {
+        switch codex.connectionPhase {
+        case .connecting, .loadingChats, .syncing:
+            return true
+        case .offline, .connected:
+            return false
         }
     }
 
-    @ViewBuilder var relayAccountsSection: some View {
-        HStack {
-            Text("Accounts")
-                .font(AppFont.caption(weight: .semibold))
-                .foregroundStyle(.secondary)
-            Spacer()
-            relayControlButton("Add") {
-                HapticFeedback.shared.triggerImpactFeedback()
-                isShowingAddAccountScanner = true
-            }
-        }
-
-        if codex.sortedRelayAccounts.isEmpty {
-            Text("No account pairing configured.")
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-        } else {
-            VStack(spacing: 8) {
-                ForEach(codex.sortedRelayAccounts) { account in
-                    relayAccountRow(account)
-                }
-            }
-        }
-
-        if let accountMessage = codex.relayAccountManagementMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !accountMessage.isEmpty {
-            Text(accountMessage)
-                .font(AppFont.caption())
-                .foregroundStyle(.red)
+    private var connectionStatusLabel: String {
+        switch codex.connectionPhase {
+        case .offline:
+            return "offline"
+        case .connecting:
+            return "connecting"
+        case .loadingChats:
+            return "loading chats"
+        case .syncing:
+            return "syncing"
+        case .connected:
+            return "connected"
         }
     }
 
-    var relaySourceHeader: some View {
-        HStack {
-            Text("Relay Sources")
-                .font(AppFont.caption(weight: .semibold))
-                .foregroundStyle(.secondary)
-            Spacer()
-            relayControlButton(
-                codex.selectedRelayBaseURL == nil ? "Auto ✓" : "Auto"
-            ) {
-                let didChange = codex.setSelectedRelayBaseURL(nil)
-                if didChange {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    retryRelayConnection()
-                }
-            }
-            relayControlButton("Retry") {
-                HapticFeedback.shared.triggerImpactFeedback()
-                retryRelayConnection()
-            }
+    private var connectionProgressLabel: String {
+        switch codex.connectionPhase {
+        case .connecting:
+            return "Connecting to relay..."
+        case .loadingChats:
+            return "Loading chats..."
+        case .syncing:
+            return "Syncing workspace..."
+        case .offline, .connected:
+            return ""
         }
     }
 
-    func relayAccountRow(_ account: CodexRelayAccountProfile) -> some View {
-        let isCurrent = codex.activeRelayAccountID == account.id
-        let isConnectedCurrent = isCurrent && codex.isConnected
+    // MARK: - Actions
 
-        return HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(account.displayName)
-                    .font(AppFont.subheadline(weight: .semibold))
-                    .foregroundStyle(.primary)
-                HStack(spacing: 6) {
-                    if isCurrent {
-                        sourceBadge("Current", tint: settingsAccentColor)
-                    }
-                    if isConnectedCurrent {
-                        sourceBadge("Connected", tint: .green)
-                    }
-                }
-                Text(account.relayURL)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-
-                if let lastConnectedText = relayAccountLastConnectedText(account) {
-                    Text(lastConnectedText)
-                        .font(AppFont.caption())
-                        .foregroundStyle(.secondary)
-                }
-
-                if let lastError = account.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !lastError.isEmpty {
-                    Text(lastError)
-                        .font(AppFont.caption())
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
-                }
-            }
-
-            Spacer(minLength: 8)
-
-            VStack(alignment: .trailing, spacing: 8) {
-                Image(systemName: isCurrent ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isCurrent ? settingsAccentColor : .secondary)
-                    .font(.system(size: 16, weight: .semibold))
-
-                Button("Rename") {
-                    pendingAccountDisplayName = account.displayName
-                    renamingAccountID = account.id
-                }
-                .font(AppFont.caption(weight: .semibold))
-                .buttonStyle(.plain)
-                .foregroundStyle(settingsAccentColor)
-
-                if !isCurrent {
-                    Button("Delete") {
-                        deletingAccountID = account.id
-                    }
-                    .font(AppFont.caption(weight: .semibold))
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.red)
-                }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isCurrent ? settingsAccentColor.opacity(0.12) : Color(.secondarySystemBackground))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isCurrent ? settingsAccentColor : Color(.separator), lineWidth: isCurrent ? 1.5 : 1)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .onTapGesture {
-            switchRelayAccount(account.id)
+    private func disconnectRelay() {
+        Task { @MainActor in
+            await codex.disconnect()
+            codex.clearSavedRelaySession()
         }
     }
 
-    func relaySourceRow(_ source: String) -> some View {
-        let probeState = probeStateBySource[source] ?? .probing
-        let isPreferred = codex.selectedRelayBaseURL == source
-        let isCurrent = isCurrentConnectedSource(source)
+    // MARK: - Runtime bindings
 
-        return Button {
-            let didChange = codex.setSelectedRelayBaseURL(source)
-            if didChange {
-                HapticFeedback.shared.triggerImpactFeedback()
-                retryRelayConnection()
-            }
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(relaySourceTitle(for: source))
-                        .font(AppFont.subheadline(weight: .semibold))
-                        .foregroundStyle(.primary)
-                    HStack(spacing: 6) {
-                        if isCurrent {
-                            sourceBadge("Current", tint: .green)
-                        }
-                        if isPreferred {
-                            sourceBadge("Preferred", tint: settingsAccentColor)
-                        }
-                    }
-                    Text(probeState.statusText)
-                        .font(AppFont.caption())
-                        .foregroundStyle(probeState == .unreachable ? .red : .secondary)
-                    Text(source)
-                        .font(AppFont.caption())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 8)
-                Image(systemName: isPreferred ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isPreferred ? settingsAccentColor : .secondary)
-                    .font(.system(size: 16, weight: .semibold))
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isPreferred ? settingsAccentColor.opacity(0.12) : Color(.secondarySystemBackground))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(isPreferred ? settingsAccentColor : Color(.separator), lineWidth: isPreferred ? 1.5 : 1)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    func sourceBadge(_ title: String, tint: Color) -> some View {
-        Text(title)
-            .font(AppFont.caption(weight: .semibold))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(tint.opacity(0.12))
-            )
-    }
-
-    func relayControlButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(title, action: action)
-            .font(AppFont.caption(weight: .semibold))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color(.secondarySystemBackground))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(Color(.separator), lineWidth: 1)
-            )
-            .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Runtime Bindings
-
-private extension SettingsView {
-    var runtimeModelOptions: [CodexModelOption] {
+    private var runtimeModelOptions: [CodexModelOption] {
         TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
     }
 
-    var runtimeReasoningOptions: [TurnComposerReasoningDisplayOption] {
+    private var runtimeReasoningOptions: [TurnComposerReasoningDisplayOption] {
         TurnComposerMetaMapper.reasoningDisplayOptions(
             from: codex.supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
         )
     }
 
-    var runtimeModelSelection: Binding<String> {
+    private var runtimeModelSelection: Binding<String> {
         Binding(
             get: { codex.selectedModelOption()?.id ?? runtimeAutoValue },
             set: { selection in
@@ -594,7 +217,7 @@ private extension SettingsView {
         )
     }
 
-    var runtimeReasoningSelection: Binding<String> {
+    private var runtimeReasoningSelection: Binding<String> {
         Binding(
             get: { codex.selectedReasoningEffort ?? runtimeAutoValue },
             set: { selection in
@@ -603,14 +226,14 @@ private extension SettingsView {
         )
     }
 
-    var runtimeAccessSelection: Binding<CodexAccessMode> {
+    private var runtimeAccessSelection: Binding<CodexAccessMode> {
         Binding(
             get: { codex.selectedAccessMode },
             set: { codex.setSelectedAccessMode($0) }
         )
     }
 
-    var runtimeServiceTierSelection: Binding<String> {
+    private var runtimeServiceTierSelection: Binding<String> {
         Binding(
             get: { codex.selectedServiceTier?.rawValue ?? runtimeNormalValue },
             set: { selection in
@@ -619,127 +242,6 @@ private extension SettingsView {
                 )
             }
         )
-    }
-}
-
-// MARK: - Actions
-
-private extension SettingsView {
-    func disconnectRelay() {
-        Task { @MainActor in
-            await codex.disconnect()
-        }
-    }
-
-    func retryRelayConnection() {
-        Task { @MainActor in
-            probeStateBySource = RelaySourceProbeState.probingStates(
-                for: codex.normalizedRelayBaseURLsForReconnect
-            )
-            if codex.isConnected {
-                await codex.disconnect(preserveReconnectIntent: true)
-            }
-            codex.shouldAutoReconnectOnForeground = true
-            codex.connectionRecoveryState = .retrying(attempt: 0, message: "Reconnecting...")
-            codex.lastErrorMessage = nil
-            await contentViewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
-            await refreshRelaySourceProbeStates()
-        }
-    }
-
-    func switchRelayAccount(_ accountId: String) {
-        let didChange = codex.switchRelayAccount(to: accountId)
-        guard didChange else {
-            return
-        }
-        HapticFeedback.shared.triggerImpactFeedback()
-        if codex.isConnected {
-            retryRelayConnection()
-            return
-        }
-        Task { @MainActor in
-            await refreshRelaySourceProbeStates()
-        }
-    }
-
-    func startNetworkPathMonitor() {
-        guard networkPathMonitor == nil else {
-            return
-        }
-
-        let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { path in
-            Task { @MainActor in
-                usesCellularInterface = path.usesInterfaceType(.cellular)
-            }
-        }
-        monitor.start(queue: networkPathMonitorQueue)
-        networkPathMonitor = monitor
-    }
-
-    func stopNetworkPathMonitor() {
-        networkPathMonitor?.cancel()
-        networkPathMonitor = nil
-    }
-
-    func refreshRelaySourceProbeStates() async {
-        let sources = codex.normalizedRelayBaseURLsForReconnect
-        guard !sources.isEmpty else {
-            probeStateBySource = [:]
-            return
-        }
-
-        probeStateBySource = RelaySourceProbeState.probingStates(for: sources)
-        for source in sources {
-            probeStateBySource[source] = await probeState(for: source)
-        }
-    }
-
-    func probeState(for baseURL: String) async -> RelaySourceProbeState {
-        let result = await contentViewModel.probeRelayHealthWithLatency(baseURL: baseURL)
-        if result.isReachable {
-            return .reachable(latencyMs: result.latencyMs ?? 1)
-        }
-        return .unreachable
-    }
-}
-
-// MARK: - Helpers
-
-private extension SettingsView {
-    func relaySourceTitle(for source: String) -> String {
-        guard let components = URLComponents(string: source),
-              let host = components.host else {
-            return source
-        }
-        return "\(components.scheme?.uppercased() ?? "RELAY") · \(host)"
-    }
-
-    func isCurrentConnectedSource(_ source: String) -> Bool {
-        guard codex.isConnected,
-              let currentURL = codex.connectedServerIdentity,
-              let sourceComponents = URLComponents(string: source),
-              let currentComponents = URLComponents(string: currentURL) else {
-            return false
-        }
-
-        let sourceScheme = sourceComponents.scheme?.lowercased()
-        let currentScheme = currentComponents.scheme?.lowercased()
-        let sourceHost = sourceComponents.host?.lowercased()
-        let currentHost = currentComponents.host?.lowercased()
-        let sourcePort = sourceComponents.port ?? (sourceScheme == "wss" ? 443 : 80)
-        let currentPort = currentComponents.port ?? (currentScheme == "wss" ? 443 : 80)
-
-        return sourceScheme == currentScheme
-            && sourceHost == currentHost
-            && sourcePort == currentPort
-    }
-
-    func relayAccountLastConnectedText(_ account: CodexRelayAccountProfile) -> String? {
-        guard let date = account.lastConnectedAt else {
-            return nil
-        }
-        return "Last connected: \(date.formatted(date: .abbreviated, time: .shortened))"
     }
 }
 

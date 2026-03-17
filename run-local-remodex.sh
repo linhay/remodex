@@ -1,346 +1,312 @@
 #!/usr/bin/env bash
 
+# FILE: run-local-remodex.sh
+# Purpose: Starts a local relay plus the public bridge for OSS and self-host workflows.
+# Layer: developer utility
+# Exports: none
+# Depends on: node, npm, curl, relay/server.js, phodex-bridge/bin/remodex.js
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RELAY_DIR="$ROOT_DIR/relay"
-BRIDGE_DIR="$ROOT_DIR/phodex-bridge"
-ENV_FILE="${REMODEX_ENV_FILE:-$ROOT_DIR/.env.local}"
-RELAY_PORT="${REMODEX_RELAY_PORT:-8787}"
-RELAY_HOST="${REMODEX_RELAY_HOST:-127.0.0.1}"
-RELAY_BIND_HOST="${REMODEX_RELAY_BIND_HOST:-}"
+BRIDGE_DIR="${ROOT_DIR}/phodex-bridge"
+RELAY_DIR="${ROOT_DIR}/relay"
+RELAY_SERVER_MODULE="${RELAY_DIR}/server.js"
+
+RELAY_BIND_HOST="${RELAY_BIND_HOST:-0.0.0.0}"
+RELAY_PORT="${RELAY_PORT:-9000}"
+RELAY_HOSTNAME="${RELAY_HOSTNAME:-}"
+RELAY_BRIDGE_HOST=""
+RELAY_PID=""
+
+log() {
+  echo "[run-local-remodex] $*"
+}
+
+die() {
+  echo "[run-local-remodex] $*" >&2
+  exit 1
+}
 
 usage() {
   cat <<'EOF'
-Usage:
-  ./run-local-remodex.sh [--relay-key <key>] [--cloudflare] [--cloudflared-token-file <path>] [--relay-url <url>] [--hostname <host>] [--port <port>] [--qr <small|none>] [--dry-run]
+Usage: ./run-local-remodex.sh [options]
 
 Options:
-  --relay-key <key>   Shared relay auth key. Optional if set in .env.local.
-  --cloudflare        Expose the local relay through a Cloudflare quick tunnel.
-  --cloudflared-token-file <path>  Start a named tunnel from a local token file.
-  --relay-url <url>   Fixed public relay URL, e.g. wss://relay.example.com/relay
-  --hostname <host>   LAN hostname for bridge relay URL. Default: $(scutil --get LocalHostName).local
-  --port <port>       Relay port. Default: 8787
-  --qr <mode>         QR output mode. Supported: small, none. Default: small
-  --dry-run           Print commands without starting services.
+  --hostname HOSTNAME   Hostname or IP the iPhone should use to reach the relay
+  --bind-host HOST      Interface/address the local relay should listen on
+  --port PORT           Relay port to listen on
+  --help                Show this help text
+
+Defaults:
+  --bind-host           0.0.0.0
+  --port                9000
+  --hostname            macOS LocalHostName.local, then hostname, then localhost
 EOF
 }
 
-require_command() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    echo "Missing required command: $1" >&2
-    exit 1
-  fi
+require_value() {
+  local flag_name="$1"
+  local remaining_args="$2"
+  [[ "${remaining_args}" -ge 2 ]] || die "${flag_name} requires a value."
 }
 
-print_cmd() {
-  printf '+'
-  for arg in "$@"; do
-    printf ' %q' "$arg"
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --hostname)
+        require_value "--hostname" "$#"
+        RELAY_HOSTNAME="$2"
+        shift 2
+        ;;
+      --bind-host)
+        require_value "--bind-host" "$#"
+        RELAY_BIND_HOST="$2"
+        shift 2
+        ;;
+      --port)
+        require_value "--port" "$#"
+        RELAY_PORT="$2"
+        shift 2
+        ;;
+      --help)
+        usage
+        exit 0
+        ;;
+      *)
+        usage >&2
+        die "Unknown argument: $1"
+        ;;
+    esac
   done
-  printf '\n'
 }
 
-run_cmd() {
-  print_cmd "$@"
-  if [[ "$DRY_RUN" == "true" ]]; then
-    return 0
+default_hostname() {
+  if [[ -n "${RELAY_HOSTNAME}" ]]; then
+    printf '%s\n' "${RELAY_HOSTNAME}"
+    return
   fi
-  "$@"
-}
 
-start_in_dir_background() {
-  local dir="$1"
-  local log_file="$2"
-  shift 2
-
-  (
-    cd "$dir"
-    "$@" >"$log_file" 2>&1
-  ) &
-
-  STARTED_PID="$!"
-}
-
-extract_cloudflare_url() {
-  local log_file="$1"
-  local attempts=0
-  while [[ $attempts -lt 30 ]]; do
-    if [[ -f "$log_file" ]]; then
-      local url
-      url="$(python3 - <<'PY' "$log_file"
-import re
-import sys
-text = open(sys.argv[1], "r", encoding="utf-8", errors="ignore").read()
-match = re.search(r'https://[a-z0-9-]+\.trycloudflare\.com', text)
-print(match.group(0) if match else "")
-PY
-)"
-      if [[ -n "$url" ]]; then
-        printf '%s\n' "$url"
-        return 0
-      fi
-    fi
-    attempts=$((attempts + 1))
-    sleep 1
-  done
-  return 1
-}
-
-detect_primary_lan_ip() {
-  local iface ip
-  iface="$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')"
-  if [[ -n "$iface" ]]; then
-    ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
-    if [[ -n "$ip" ]]; then
-      printf '%s\n' "$ip"
-      return 0
+  if command -v scutil >/dev/null 2>&1; then
+    local local_host_name
+    local_host_name="$(scutil --get LocalHostName 2>/dev/null || true)"
+    local_host_name="${local_host_name//[$'\r\n']}"
+    if [[ -n "${local_host_name}" ]]; then
+      printf '%s.local\n' "${local_host_name}"
+      return
     fi
   fi
 
-  for iface in en0 en1 bridge0; do
-    ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
-    if [[ -n "$ip" ]]; then
-      printf '%s\n' "$ip"
-      return 0
-    fi
-  done
-  return 1
+  local host_name
+  host_name="$(hostname 2>/dev/null || true)"
+  host_name="${host_name//[$'\r\n']}"
+  if [[ -n "${host_name}" ]]; then
+    printf '%s\n' "${host_name}"
+    return
+  fi
+
+  printf 'localhost\n'
 }
 
-RELAY_KEY="${REMODEX_RELAY_KEY:-}"
-USE_CLOUDFLARE="false"
-DRY_RUN="false"
-HOSTNAME_VALUE="${REMODEX_LAN_HOSTNAME:-}"
-QR_MODE="${REMODEX_QR_MODE:-small}"
-PUBLIC_RELAY_URL="${REMODEX_PUBLIC_RELAY_URL:-}"
-TUNNEL_TOKEN_FILE="${REMODEX_CLOUDFLARED_TOKEN_FILE:-}"
-
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-  RELAY_PORT="${REMODEX_RELAY_PORT:-$RELAY_PORT}"
-  HOSTNAME_VALUE="${REMODEX_LAN_HOSTNAME:-$HOSTNAME_VALUE}"
-  RELAY_KEY="${REMODEX_RELAY_KEY:-$RELAY_KEY}"
-  QR_MODE="${REMODEX_QR_MODE:-$QR_MODE}"
-  RELAY_BIND_HOST="${REMODEX_RELAY_BIND_HOST:-$RELAY_BIND_HOST}"
-  PUBLIC_RELAY_URL="${REMODEX_PUBLIC_RELAY_URL:-$PUBLIC_RELAY_URL}"
-  TUNNEL_TOKEN_FILE="${REMODEX_CLOUDFLARED_TOKEN_FILE:-$TUNNEL_TOKEN_FILE}"
-fi
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --relay-key)
-      RELAY_KEY="${2:-}"
-      shift 2
+healthcheck_host() {
+  case "${RELAY_BIND_HOST}" in
+    ""|"0.0.0.0")
+      printf '127.0.0.1\n'
       ;;
-    --cloudflare)
-      USE_CLOUDFLARE="true"
-      shift
-      ;;
-    --cloudflared-token-file)
-      TUNNEL_TOKEN_FILE="${2:-}"
-      shift 2
-      ;;
-    --relay-url)
-      PUBLIC_RELAY_URL="${2:-}"
-      shift 2
-      ;;
-    --hostname)
-      HOSTNAME_VALUE="${2:-}"
-      shift 2
-      ;;
-    --port)
-      RELAY_PORT="${2:-}"
-      shift 2
-      ;;
-    --qr)
-      QR_MODE="${2:-}"
-      shift 2
-      ;;
-    --dry-run)
-      DRY_RUN="true"
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
+    "::")
+      printf '[::1]\n'
       ;;
     *)
-      echo "Unknown option: $1" >&2
-      usage >&2
-      exit 1
+      printf '%s\n' "${RELAY_BIND_HOST}"
       ;;
   esac
-done
-
-if [[ -z "$RELAY_KEY" ]]; then
-  echo "REMODEX_RELAY_KEY is required. Pass --relay-key or create $ENV_FILE" >&2
-  usage >&2
-  exit 1
-fi
-
-if [[ "$QR_MODE" != "small" && "$QR_MODE" != "none" ]]; then
-  echo "Unsupported --qr mode: $QR_MODE" >&2
-  usage >&2
-  exit 1
-fi
-
-if [[ -n "$PUBLIC_RELAY_URL" ]]; then
-  USE_CLOUDFLARE="false"
-fi
-
-if [[ -n "$TUNNEL_TOKEN_FILE" ]]; then
-  USE_CLOUDFLARE="false"
-fi
-
-if [[ -n "$TUNNEL_TOKEN_FILE" && -z "$PUBLIC_RELAY_URL" ]]; then
-  echo "REMODEX_PUBLIC_RELAY_URL is required when using --cloudflared-token-file" >&2
-  exit 1
-fi
-
-require_command node
-require_command python3
-
-if [[ "$USE_CLOUDFLARE" == "true" || -n "$TUNNEL_TOKEN_FILE" ]]; then
-  require_command cloudflared
-fi
-
-if [[ -z "$HOSTNAME_VALUE" && "$USE_CLOUDFLARE" == "false" ]]; then
-  if scutil --get LocalHostName >/dev/null 2>&1; then
-    HOSTNAME_VALUE="$(scutil --get LocalHostName).local"
-  else
-    HOSTNAME_VALUE="$(hostname).local"
-  fi
-fi
-
-if [[ -z "$RELAY_BIND_HOST" ]]; then
-  if [[ "$USE_CLOUDFLARE" == "true" || -n "$TUNNEL_TOKEN_FILE" ]]; then
-    RELAY_BIND_HOST="127.0.0.1"
-  else
-    RELAY_BIND_HOST="0.0.0.0"
-  fi
-fi
-
-RELAY_LOG="$(mktemp -t remodex-relay-log.XXXXXX)"
-TUNNEL_LOG=""
-
-cleanup() {
-  local exit_code=$?
-  if [[ -n "${BRIDGE_PID:-}" ]]; then
-    kill "$BRIDGE_PID" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "${TUNNEL_PID:-}" ]]; then
-    kill "$TUNNEL_PID" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "${RELAY_PID:-}" ]]; then
-    kill "$RELAY_PID" >/dev/null 2>&1 || true
-  fi
-  exit "$exit_code"
 }
 
-trap cleanup INT TERM EXIT
-
-if [[ "$DRY_RUN" == "false" ]]; then
-  print_cmd env "HOST=$RELAY_BIND_HOST" "PORT=$RELAY_PORT" "REMODEX_RELAY_KEY=$RELAY_KEY" node ./server.cjs '>' "$RELAY_LOG" "2>&1" '&' "(cwd: $RELAY_DIR)"
-  start_in_dir_background "$RELAY_DIR" "$RELAY_LOG" env "HOST=$RELAY_BIND_HOST" "PORT=$RELAY_PORT" "REMODEX_RELAY_KEY=$RELAY_KEY" node ./server.cjs
-  RELAY_PID="$STARTED_PID"
-  sleep 1
-  if ! curl -sf "http://$RELAY_HOST:$RELAY_PORT/health" >/dev/null; then
-    echo "Relay failed to start. Log:" >&2
-    cat "$RELAY_LOG" >&2
-    exit 1
+cleanup() {
+  if [[ -n "${RELAY_PID}" ]] && kill -0 "${RELAY_PID}" 2>/dev/null; then
+    kill "${RELAY_PID}" 2>/dev/null || true
+    wait "${RELAY_PID}" 2>/dev/null || true
   fi
-else
-  print_cmd env "HOST=$RELAY_BIND_HOST" "PORT=$RELAY_PORT" "REMODEX_RELAY_KEY=$RELAY_KEY" node ./server.cjs '>' "$RELAY_LOG" "2>&1" '&' "(cwd: $RELAY_DIR)"
-  RELAY_PID=""
-fi
+}
 
-if [[ -n "$TUNNEL_TOKEN_FILE" ]]; then
-  TUNNEL_LOG="$(mktemp -t remodex-cloudflared-log.XXXXXX)"
-  if [[ "$DRY_RUN" == "true" ]]; then
-    print_cmd cloudflared tunnel --protocol http2 --url "http://$RELAY_HOST:$RELAY_PORT" run --token-file "$TUNNEL_TOKEN_FILE" '>' "$TUNNEL_LOG" "2>&1" '&'
-  else
-    print_cmd cloudflared tunnel --protocol http2 --url "http://$RELAY_HOST:$RELAY_PORT" run --token-file "$TUNNEL_TOKEN_FILE" '>' "$TUNNEL_LOG" "2>&1" '&'
-    start_in_dir_background "$ROOT_DIR" "$TUNNEL_LOG" cloudflared tunnel --protocol http2 --url "http://$RELAY_HOST:$RELAY_PORT" run --token-file "$TUNNEL_TOKEN_FILE"
-    TUNNEL_PID="$STARTED_PID"
-    sleep 2
+require_command() {
+  local command_name="$1"
+  command -v "${command_name}" >/dev/null 2>&1 || die "Missing required command: ${command_name}"
+}
+
+ensure_node_version() {
+  local node_version
+  local node_major
+
+  node_version="$(node -p 'process.versions.node' 2>/dev/null || true)"
+  [[ -n "${node_version}" ]] || die "Unable to determine the installed Node.js version."
+
+  node_major="${node_version%%.*}"
+  [[ "${node_major}" =~ ^[0-9]+$ ]] || die "Unable to parse the installed Node.js version: ${node_version}"
+  (( node_major >= 18 )) || die "Please use Node.js 18 or newer."
+}
+
+ensure_prerequisites() {
+  require_command node
+  require_command npm
+  require_command curl
+  ensure_node_version
+}
+
+# Validates the advertised host before boot so the QR cannot point at another machine by mistake.
+ensure_hostname_belongs_to_this_mac() {
+  node -e '
+const dns = require("node:dns");
+const os = require("node:os");
+
+const hostname = process.argv[1];
+const localAddresses = new Set(["127.0.0.1", "::1"]);
+for (const addresses of Object.values(os.networkInterfaces())) {
+  for (const address of addresses || []) {
+    if (address && typeof address.address === "string" && address.address) {
+      localAddresses.add(address.address);
+    }
+  }
+}
+
+dns.lookup(hostname, { all: true }, (error, records) => {
+  if (error || !Array.isArray(records) || records.length === 0) {
+    process.exit(1);
+    return;
+  }
+
+  const isLocal = records.some((record) => localAddresses.has(record.address));
+  process.exit(isLocal ? 0 : 1);
+});
+' "${RELAY_HOSTNAME}" || die "The advertised hostname '${RELAY_HOSTNAME}' does not resolve back to this Mac.
+Pass --hostname with a LAN hostname or IP address that points to this machine so the iPhone can connect."
+}
+
+package_dependencies_installed() {
+  local package_dir="$1"
+
+  node -e '
+const { createRequire } = require("node:module");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const packageDir = process.argv[1];
+const packageJsonPath = path.join(packageDir, "package.json");
+if (!fs.existsSync(packageJsonPath)) {
+  process.exit(1);
+}
+
+const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+const dependencyNames = Object.keys(pkg.dependencies || {});
+const requireFromPackage = createRequire(packageJsonPath);
+
+for (const dependencyName of dependencyNames) {
+  try {
+    requireFromPackage.resolve(`${dependencyName}/package.json`);
+  } catch {
+    process.exit(1);
+  }
+}
+
+process.exit(0);
+' "${package_dir}"
+}
+
+ensure_package_dependencies() {
+  local package_dir="$1"
+  if package_dependencies_installed "${package_dir}"; then
+    return
   fi
-  RELAY_URL="$PUBLIC_RELAY_URL"
-elif [[ -n "$PUBLIC_RELAY_URL" ]]; then
-  RELAY_URL="$PUBLIC_RELAY_URL"
-elif [[ "$USE_CLOUDFLARE" == "true" ]]; then
-  TUNNEL_LOG="$(mktemp -t remodex-cloudflared-log.XXXXXX)"
-  if [[ "$DRY_RUN" == "true" ]]; then
-    print_cmd cloudflared tunnel --protocol http2 --url "http://$RELAY_HOST:$RELAY_PORT" '>' "$TUNNEL_LOG" "2>&1" '&'
-    RELAY_URL="wss://<trycloudflare-host>/relay"
-  else
-    print_cmd cloudflared tunnel --protocol http2 --url "http://$RELAY_HOST:$RELAY_PORT" '>' "$TUNNEL_LOG" "2>&1" '&'
-    start_in_dir_background "$ROOT_DIR" "$TUNNEL_LOG" cloudflared tunnel --protocol http2 --url "http://$RELAY_HOST:$RELAY_PORT"
-    TUNNEL_PID="$STARTED_PID"
-    TUNNEL_HTTP_URL="$(extract_cloudflare_url "$TUNNEL_LOG")"
-    if [[ -z "$TUNNEL_HTTP_URL" ]]; then
-      echo "Failed to get TryCloudflare URL. Log:" >&2
-      cat "$TUNNEL_LOG" >&2
-      exit 1
+
+  log "Installing dependencies in ${package_dir}"
+  (cd "${package_dir}" && npm install)
+}
+
+ensure_port_available() {
+  if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"${RELAY_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+    die "Port ${RELAY_PORT} is already in use. Stop the existing listener or rerun with --port."
+  fi
+}
+
+wait_for_relay() {
+  local attempt
+  local probe_host
+
+  probe_host="$(healthcheck_host)"
+  for attempt in {1..20}; do
+    if [[ -n "${RELAY_PID}" ]] && ! kill -0 "${RELAY_PID}" 2>/dev/null; then
+      die "Relay process exited before becoming healthy."
     fi
-    RELAY_URL="${TUNNEL_HTTP_URL/https:/wss:}/relay"
-  fi
-else
-  RELAY_URL="ws://$HOSTNAME_VALUE:$RELAY_PORT/relay"
-fi
+    if curl --silent --fail "http://${probe_host}:${RELAY_PORT}/health" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 0.5
+  done
 
-LAN_HOSTNAME_VALUE="$HOSTNAME_VALUE"
-if [[ -z "$LAN_HOSTNAME_VALUE" ]]; then
-  if scutil --get LocalHostName >/dev/null 2>&1; then
-    LAN_HOSTNAME_VALUE="$(scutil --get LocalHostName).local"
-  else
-    LAN_HOSTNAME_VALUE="$(hostname).local"
-  fi
-fi
-LAN_RELAY_URL="ws://$LAN_HOSTNAME_VALUE:$RELAY_PORT/relay"
+  die "Relay did not become healthy on port ${RELAY_PORT}."
+}
 
-LAN_IP_VALUE="$(detect_primary_lan_ip 2>/dev/null || true)"
-LAN_IP_RELAY_URL=""
-if [[ -n "$LAN_IP_VALUE" ]]; then
-  LAN_IP_RELAY_URL="ws://$LAN_IP_VALUE:$RELAY_PORT/relay"
-fi
+start_embedded_relay() {
+  log "Starting relay on ${RELAY_BIND_HOST}:${RELAY_PORT}"
 
-# Bridge always connects locally; iPhone chooses between pairing relay candidates.
-BRIDGE_RELAY_URL="ws://127.0.0.1:$RELAY_PORT/relay"
-PAIRING_RELAY_URL="$RELAY_URL"
+  RELAY_BIND_HOST="${RELAY_BIND_HOST}" \
+  RELAY_PORT="${RELAY_PORT}" \
+  RELAY_SERVER_MODULE="${RELAY_SERVER_MODULE}" \
+  node <<'NODE' &
+const { createRelayServer } = require(process.env.RELAY_SERVER_MODULE);
 
-RELAY_CANDIDATES="$PAIRING_RELAY_URL"
-if [[ "$LAN_RELAY_URL" != "$RELAY_URL" ]]; then
-  RELAY_CANDIDATES="$RELAY_CANDIDATES,$LAN_RELAY_URL"
-fi
-if [[ -n "$LAN_IP_RELAY_URL" && "$LAN_IP_RELAY_URL" != "$PAIRING_RELAY_URL" && "$LAN_IP_RELAY_URL" != "$LAN_RELAY_URL" ]]; then
-  RELAY_CANDIDATES="$RELAY_CANDIDATES,$LAN_IP_RELAY_URL"
-fi
+const host = process.env.RELAY_BIND_HOST || "0.0.0.0";
+const port = Number.parseInt(process.env.RELAY_PORT || "9000", 10);
+const { server } = createRelayServer();
 
-BRIDGE_PAIRING_CODE_ENV=""
-if [[ "$QR_MODE" == "none" ]]; then
-  BRIDGE_PAIRING_CODE_ENV="true"
-else
-  BRIDGE_PAIRING_CODE_ENV="${REMODEX_PRINT_PAIRING_CODE:-false}"
-fi
+server.listen(port, host, () => {
+  console.log(`[relay] listening on http://${host}:${port}`);
+});
 
-print_cmd bash -lc "cd $(printf '%q' "$BRIDGE_DIR") && REMODEX_RELAY=$(printf '%q' "$BRIDGE_RELAY_URL") REMODEX_PAIRING_RELAY=$(printf '%q' "$PAIRING_RELAY_URL") REMODEX_RELAY_CANDIDATES=$(printf '%q' "$RELAY_CANDIDATES") REMODEX_RELAY_KEY=$(printf '%q' "$RELAY_KEY") REMODEX_QR_MODE=$(printf '%q' "$QR_MODE") REMODEX_PRINT_PAIRING_CODE=$(printf '%q' "$BRIDGE_PAIRING_CODE_ENV") node ./bin/remodex.js up"
+function shutdown(signal) {
+  console.log(`[relay] shutting down (${signal})`);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 5_000).unref();
+}
 
-if [[ "$DRY_RUN" == "true" ]]; then
-  exit 0
-fi
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+NODE
 
-cd "$BRIDGE_DIR"
-REMODEX_RELAY="$BRIDGE_RELAY_URL" \
-REMODEX_PAIRING_RELAY="$PAIRING_RELAY_URL" \
-REMODEX_RELAY_CANDIDATES="$RELAY_CANDIDATES" \
-REMODEX_RELAY_KEY="$RELAY_KEY" \
-REMODEX_QR_MODE="$QR_MODE" \
-REMODEX_PRINT_PAIRING_CODE="$BRIDGE_PAIRING_CODE_ENV" \
-node ./bin/remodex.js up &
-BRIDGE_PID=$!
-wait "$BRIDGE_PID"
+  RELAY_PID=$!
+}
+
+print_summary() {
+  cat <<EOF
+[run-local-remodex] Configuration
+  Relay bind host : ${RELAY_BIND_HOST}
+  Relay port      : ${RELAY_PORT}
+  Relay hostname  : ${RELAY_HOSTNAME}
+  Bridge host     : ${RELAY_BRIDGE_HOST}
+  Relay URL       : ws://${RELAY_HOSTNAME}:${RELAY_PORT}/relay
+EOF
+}
+
+start_bridge() {
+  log "Starting bridge"
+  cd "${BRIDGE_DIR}"
+  # The bridge bakes REMODEX_RELAY into the pairing QR, so advertise the host
+  # the iPhone can actually reach instead of the loopback health-check host.
+  REMODEX_RELAY="ws://${RELAY_HOSTNAME}:${RELAY_PORT}/relay" node ./bin/remodex.js up
+}
+
+trap cleanup EXIT INT TERM
+
+parse_args "$@"
+RELAY_HOSTNAME="$(default_hostname)"
+RELAY_BRIDGE_HOST="$(healthcheck_host)"
+
+ensure_prerequisites
+ensure_package_dependencies "${BRIDGE_DIR}"
+ensure_package_dependencies "${RELAY_DIR}"
+ensure_hostname_belongs_to_this_mac
+ensure_port_available
+print_summary
+start_embedded_relay
+wait_for_relay
+start_bridge

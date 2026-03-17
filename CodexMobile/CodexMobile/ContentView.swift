@@ -20,6 +20,7 @@ struct ContentView: View {
     @State private var isShowingManualScanner = false
     @State private var isSearchActive = false
     @State private var isRetryingBridgeUpdate = false
+    @State private var isPreparingManualScanner = false
     @State private var threadCompletionBannerDismissTask: Task<Void, Never>?
     @AppStorage("codex.hasSeenOnboarding") private var hasSeenOnboarding = false
 
@@ -28,47 +29,18 @@ struct ContentView: View {
 
     var body: some View {
         rootContent
-            // Keep launch/foreground reconnect observers alive even while the QR scanner is visible.
+            // Only resume saved-pairing recovery after onboarding is done and the manual scanner is not in control.
             .task {
-                if ProcessInfo.processInfo.arguments.contains("-CodexUITestsOpenSettings") {
-                    showSettings = true
-                }
-                seedRelayAccountsForUITestsIfNeeded()
-                #if targetEnvironment(simulator)
-                hasSeenOnboarding = true
-                if !codex.isConnected,
-                   !codex.isConnecting,
-                   let simulatorProbe = simulatorPairingPayloadProbe(),
-                   case .success(let simulatorPayload, let source) = simulatorProbe {
-                    simDebugLog("found pairing payload from \(source.rawValue) for session \(simulatorPayload.sessionId)")
-                    await viewModel.connectToRelay(
-                        pairingPayload: simulatorPayload,
-                        codex: codex
-                    )
-                } else {
-                    logSimulatorPairingProbeFailureIfNeeded()
-                }
-                #endif
-                await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
-            }
-            .task(id: scenePhase) {
-                guard scenePhase == .active else {
+                guard hasSeenOnboarding, !isShowingManualScanner else {
                     return
                 }
-
-                while !Task.isCancelled, scenePhase == .active {
-                    await viewModel.autoSwitchRelayIfNeeded(codex: codex)
-                    try? await Task.sleep(nanoseconds: viewModel.relayAutoSwitchInterval())
-                }
+                await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
             }
             .onChange(of: showSettings) { _, show in
-                if ContentSettingsNavigationGate.shouldAppendSettingsRoute(
-                    showSettings: show,
-                    navigationPathIsEmpty: navigationPath.isEmpty
-                ) {
+                if show {
                     navigationPath.append("settings")
+                    showSettings = false
                 }
-                showSettings = false
             }
             .onChange(of: isSidebarOpen) { wasOpen, isOpen in
                 guard !wasOpen, isOpen else {
@@ -104,13 +76,16 @@ struct ContentView: View {
             .onChange(of: scenePhase) { _, phase in
                 codex.setForegroundState(phase != .background)
                 if phase == .active {
+                    guard hasSeenOnboarding, !isShowingManualScanner else {
+                        return
+                    }
                     Task {
                         await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
                     }
                 }
             }
             .onChange(of: codex.shouldAutoReconnectOnForeground) { _, shouldReconnect in
-                guard shouldReconnect, scenePhase == .active else {
+                guard shouldReconnect, scenePhase == .active, hasSeenOnboarding, !isShowingManualScanner else {
                     return
                 }
                 Task {
@@ -141,6 +116,23 @@ struct ContentView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
             }
+            .alert(
+                "Chat Deleted",
+                isPresented: missingNotificationThreadAlertIsPresented,
+                presenting: codex.missingNotificationThreadPrompt
+            ) { _ in
+                Button("Not Now", role: .cancel) {
+                    codex.missingNotificationThreadPrompt = nil
+                }
+                Button("Start New Chat") {
+                    codex.missingNotificationThreadPrompt = nil
+                    Task {
+                        await startNewThreadFromMissingNotificationAlert()
+                    }
+                }
+            } message: { _ in
+                Text("This chat is no longer available. Start a new chat instead?")
+            }
             .overlay(alignment: .top) {
                 if let banner = codex.threadCompletionBanner {
                     ThreadCompletionBannerView(
@@ -162,20 +154,29 @@ struct ContentView: View {
 
     @ViewBuilder
     private var rootContent: some View {
-        let bypassScannerForUITests = ProcessInfo.processInfo.arguments.contains("-CodexUITestsBypassScanner")
-
         if !hasSeenOnboarding {
             OnboardingView {
-                withAnimation { hasSeenOnboarding = true }
+                finishOnboardingAndShowScanner()
             }
-        } else if bypassScannerForUITests {
-            mainAppBody
         } else if isShowingManualScanner && !codex.isConnected {
             qrScannerBody
-        } else if codex.isConnected || viewModel.isAttemptingAutoReconnect || shouldShowReconnectShell {
+        } else if codex.isConnected
+            || viewModel.isAttemptingAutoReconnect
+            || shouldShowReconnectShell
+            || isPreparingManualScanner {
             mainAppBody
         } else {
             qrScannerBody
+        }
+    }
+
+    private func finishOnboardingAndShowScanner() {
+        codex.shouldAutoReconnectOnForeground = false
+        codex.connectionRecoveryState = .idle
+        codex.lastErrorMessage = nil
+        withAnimation {
+            hasSeenOnboarding = true
+            isShowingManualScanner = true
         }
     }
 
@@ -252,6 +253,7 @@ struct ContentView: View {
         } else {
             HomeEmptyStateView(
                 connectionPhase: homeConnectionPhase,
+                statusMessage: codex.lastErrorMessage,
                 securityLabel: codex.secureConnectionState.statusLabel,
                 onToggleConnection: {
                     Task {
@@ -261,14 +263,12 @@ struct ContentView: View {
             ) {
                 if homeConnectionPhase == .connecting || (codex.hasSavedRelaySession && !codex.isConnected) {
                     Button("Scan New QR Code") {
-                        Task {
-                            await viewModel.stopAutoReconnectForManualScan(codex: codex)
-                        }
-                        isShowingManualScanner = true
+                        presentManualScannerAfterStoppingReconnect()
                     }
                     .font(AppFont.subheadline(weight: .semibold))
                     .foregroundStyle(.primary)
                     .buttonStyle(.plain)
+                    .disabled(isPreparingManualScanner)
                 }
             }
             .toolbar {
@@ -367,9 +367,15 @@ struct ContentView: View {
         }
     }
 
-    // Shows the remembered pairing shell after app relaunch so the user can reconnect without rescanning.
+    // Shows the remembered pairing shell while a saved pairing can still be retried.
     private var shouldShowReconnectShell: Bool {
-        codex.hasSavedRelaySession && !isShowingManualScanner
+        codex.hasSavedRelaySession
+            && !isShowingManualScanner
+            && (codex.isConnecting
+                || viewModel.isAttemptingAutoReconnect
+                || codex.shouldAutoReconnectOnForeground
+                || isRetryingSavedPairing
+                || hasIdleSavedPairingRecovery)
     }
 
     // Keeps home status honest during reconnect loops while letting post-connect sync show separately.
@@ -378,6 +384,27 @@ struct ContentView: View {
             return .connecting
         }
         return codex.connectionPhase
+    }
+
+    private var isRetryingSavedPairing: Bool {
+        if case .retrying = codex.connectionRecoveryState {
+            return true
+        }
+        return false
+    }
+
+    // Keeps the reconnect CTA visible after retries stop, unless the pairing must be replaced.
+    private var hasIdleSavedPairingRecovery: Bool {
+        guard codex.hasSavedRelaySession,
+              !codex.isConnected,
+              codex.secureConnectionState != .rePairRequired else {
+            return false
+        }
+
+        return !codex.isConnecting
+            && !viewModel.isAttemptingAutoReconnect
+            && !codex.shouldAutoReconnectOnForeground
+            && !isRetryingSavedPairing
     }
 
     private func finishGesture(open: Bool) {
@@ -392,6 +419,17 @@ struct ContentView: View {
         Binding(
             get: { codex.bridgeUpdatePrompt },
             set: { codex.bridgeUpdatePrompt = $0 }
+        )
+    }
+
+    private var missingNotificationThreadAlertIsPresented: Binding<Bool> {
+        Binding(
+            get: { codex.missingNotificationThreadPrompt != nil },
+            set: { isPresented in
+                if !isPresented {
+                    codex.missingNotificationThreadPrompt = nil
+                }
+            }
         )
     }
 
@@ -411,42 +449,32 @@ struct ContentView: View {
         }
     }
 
-    private func simulatorPairingPayloadProbe() -> SimulatorPairingPayloadProbeResult? {
-        #if targetEnvironment(simulator)
-        probeSimulatorPairingPayload(
-            environment: ProcessInfo.processInfo.environment,
-            pasteboardString: UIPasteboard.general.string
-        )
-        #else
-        return nil
-        #endif
-    }
-
-    private func logSimulatorPairingProbeFailureIfNeeded() {
-        #if targetEnvironment(simulator)
-        switch simulatorPairingPayloadProbe() {
-        case .none, .missing:
-            simDebugLog("no valid simulator pairing payload on launch")
-        case .failure(let failure):
-            simDebugLog(
-                "simulator pairing payload invalid from \(failure.source.rawValue): \(failure.message); raw=\(failure.rawPreview)"
-            )
-        case .success:
-            break
-        }
-        #endif
-    }
-
     // Switches the user back to the QR path when the old relay session is no longer useful.
     private func presentManualScannerForBridgeRecovery() {
         codex.bridgeUpdatePrompt = nil
         isRetryingBridgeUpdate = false
+        presentManualScannerAfterStoppingReconnect()
+    }
+
+    // Shows the QR scanner immediately and tears down any stale reconnect in the background.
+    private func presentManualScannerAfterStoppingReconnect() {
+        guard !isShowingManualScanner else {
+            return
+        }
+
+        isShowingManualScanner = true
 
         Task {
             await viewModel.stopAutoReconnectForManualScan(codex: codex)
-            await MainActor.run {
-                isShowingManualScanner = true
-            }
+        }
+    }
+
+    private func startNewThreadFromMissingNotificationAlert() async {
+        do {
+            let thread = try await codex.startThread()
+            selectedThread = thread
+        } catch {
+            codex.lastErrorMessage = codex.userFacingTurnErrorMessage(from: error)
         }
     }
 
@@ -516,113 +544,6 @@ struct ContentView: View {
             selectedThread = first
         }
     }
-
-    private func seedRelayAccountsForUITestsIfNeeded() {
-        guard ProcessInfo.processInfo.arguments.contains("-CodexUITestsSeedRelayAccounts"),
-              codex.relayAccountProfiles.isEmpty else {
-            return
-        }
-
-        let relayAuthKey = "uitest-auth-key"
-        let macIdentityPublicKey = Data(repeating: 7, count: 32).base64EncodedString()
-
-        let accountA = CodexPairingQRPayload(
-            v: codexPairingQRVersion,
-            relay: "wss://relay.section.trade/relay",
-            relayCandidates: [
-                "wss://relay.section.trade/relay",
-                "ws://linhey.local:8788/relay",
-            ],
-            relayAuthKey: relayAuthKey,
-            sessionId: "uitest-session-public",
-            macDeviceId: "uitest-mac-public",
-            macIdentityPublicKey: macIdentityPublicKey,
-            expiresAt: Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)
-        )
-        codex.rememberRelayPairing(accountA)
-
-        let accountB = CodexPairingQRPayload(
-            v: codexPairingQRVersion,
-            relay: "ws://linhey.local:8788/relay",
-            relayCandidates: [
-                "ws://linhey.local:8788/relay",
-                "wss://relay.section.trade/relay",
-            ],
-            relayAuthKey: relayAuthKey,
-            sessionId: "uitest-session-lan",
-            macDeviceId: "uitest-mac-lan",
-            macIdentityPublicKey: macIdentityPublicKey,
-            expiresAt: Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)
-        )
-        codex.rememberRelayPairing(accountB)
-    }
-}
-
-enum ContentSettingsNavigationGate {
-    static func shouldAppendSettingsRoute(
-        showSettings: Bool,
-        navigationPathIsEmpty: Bool
-    ) -> Bool {
-        showSettings && navigationPathIsEmpty
-    }
-}
-
-enum SimulatorPairingPayloadSource: String, Equatable {
-    case environment
-    case pasteboard
-}
-
-struct SimulatorPairingPayloadFailure: Equatable {
-    let source: SimulatorPairingPayloadSource
-    let message: String
-    let rawPreview: String
-}
-
-enum SimulatorPairingPayloadProbeResult {
-    case missing
-    case success(CodexPairingQRPayload, SimulatorPairingPayloadSource)
-    case failure(SimulatorPairingPayloadFailure)
-}
-
-func probeSimulatorPairingPayload(
-    environment: [String: String],
-    pasteboardString: String?
-) -> SimulatorPairingPayloadProbeResult {
-    if let rawValue = environment["REMODEX_SIM_PAIRING_PAYLOAD"] {
-        return parseSimulatorPairingPayload(rawValue, source: .environment)
-    }
-
-    if let pasteboardString, !pasteboardString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        return parseSimulatorPairingPayload(pasteboardString, source: .pasteboard)
-    }
-
-    return .missing
-}
-
-private func parseSimulatorPairingPayload(
-    _ rawValue: String,
-    source: SimulatorPairingPayloadSource
-) -> SimulatorPairingPayloadProbeResult {
-    do {
-        return .success(try CodexPairingQRPayload.parse(from: rawValue), source)
-    } catch {
-        return .failure(
-            SimulatorPairingPayloadFailure(
-                source: source,
-                message: error.localizedDescription,
-                rawPreview: simulatorPairingRawPreview(rawValue)
-            )
-        )
-    }
-}
-
-private func simulatorPairingRawPreview(_ rawValue: String) -> String {
-    let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-    if trimmed.count <= 120 {
-        return trimmed
-    }
-
-    return "\(trimmed.prefix(120))..."
 }
 
 private struct TwoLineHamburgerIcon: View {

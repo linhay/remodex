@@ -1,32 +1,25 @@
 # Relay
 
-This folder contains the thin WebSocket relay used by the default hosted Remodex pairing flow.
+This folder contains the public relay and push-service code used by Remodex pairing.
 
-Two deployment targets are included:
-
-- `relay.js`: the original Node.js `ws` module
-- `server.cjs`: a local HTTP/WebSocket server for self-hosting or Cloudflare Tunnel
-- `worker.js`: a Cloudflare Workers + Durable Objects deployment target
-
-In production, the default hosted relay runs on my VPS. If you want, you can inspect this code, fork it, and host the same relay yourself.
+The point of keeping this code in the repo is transparency: anyone forking Remodex can inspect the transport boundary, verify the encrypted-session flow, and run a compatible relay of their own. What should stay private is the actual deployed endpoint and any production credentials.
 
 ## What It Does
 
 - accepts WebSocket connections at `/relay/{sessionId}`
 - pairs one Mac host with one live iPhone client for a session
 - forwards secure control messages and encrypted payloads between Mac and iPhone
+- exposes optional HTTP endpoints for push registration and run-completion alerts only when push is enabled explicitly
 - logs only connection metadata and payload sizes, not plaintext prompts or responses
-- exposes lightweight stats for a health endpoint
 
 ## What It Does Not Do
 
 - it does not run Codex
 - it does not execute git commands
-- it does not contain your repository checkout
-- it does not persist the local workspace on the server
+- it does not contain the user's repository checkout
+- it does not decrypt Remodex application payloads after the secure session is established
 
 Codex, git, and local file operations still run on the user's Mac.
-The relay is intentionally blind to Remodex application contents once the secure handshake completes.
 
 ## Security Model
 
@@ -37,97 +30,85 @@ Remodex uses the relay as a transport hop, not as a trusted application server.
 - The relay can still observe connection metadata and the plaintext secure control messages needed to establish the encrypted session.
 - The relay does not receive plaintext Remodex application payloads after the secure session is active.
 
+## Relay Flow
+
+```mermaid
+flowchart TD
+    A[Mac bridge starts] --> B[Bridge creates sessionId and notification secret]
+    B --> C[Bridge prints QR with relay URL, sessionId, bridge identity key, expiry]
+    B --> D[Mac opens WebSocket to /relay/{sessionId}<br/>x-role: mac]
+    D --> E[Relay creates in-memory session room]
+
+    C --> F[iPhone scans QR]
+    F --> G[iPhone opens WebSocket to /relay/{sessionId}<br/>x-role: iphone]
+    G --> H{Mac session live?}
+    H -- No --> I[Relay closes iPhone socket<br/>4002 session unavailable]
+    H -- Yes --> J[Relay binds iPhone to that session]
+
+    E --> K[Relay forwards secure control messages]
+    J --> K
+    K --> L[Mac and iPhone exchange signed handshake]
+    L --> M[Both sides derive AES-256-GCM session keys]
+
+    M --> N[iPhone sends encrypted app messages]
+    M --> O[Mac sends encrypted Codex and bridge responses]
+    N --> P[Relay forwards ciphertext to Mac]
+    O --> Q[Relay forwards ciphertext to iPhone]
+
+    P --> R[Bridge decrypts and routes locally]
+    R --> S[Codex app-server / git / workspace handlers]
+    S --> O
+
+    Q --> T[iPhone decrypts and renders timeline]
+
+    D --> U[Relay stores per-session notification secret]
+    U --> V[Push registration/completion endpoints only work while live Mac session exists]
+
+    D --> W{Mac reconnects?}
+    W -- Yes --> X[Relay replaces older Mac socket<br/>4001 to old connection]
+    G --> Y{iPhone reconnects?}
+    Y -- Yes --> Z[Relay replaces older iPhone socket<br/>4003 to old connection]
+
+    X --> E
+    Z --> J
+
+    D --> AA{Mac disconnects?}
+    AA -- Yes --> AB[Relay closes iPhone socket(s)<br/>4002 Mac disconnected]
+    AB --> AC[Empty session cleaned up after delay]
+```
+
 ## Protocol Notes
 
-- path: `/relay/{sessionId}`
+- WebSocket path: `/relay/{sessionId}`
 - required header: `x-role: mac` or `x-role: iphone`
-- optional header: `x-remodex-relay-key` when relay auth is enabled
 - close code `4000`: invalid session or role
 - close code `4001`: previous Mac connection replaced
 - close code `4002`: session unavailable / Mac disconnected
 - close code `4003`: previous iPhone connection replaced
-- close code `4004`: missing or invalid relay key
 
-## Cloudflare Deployment
+Optional HTTP endpoints:
 
-The Cloudflare version keeps one Durable Object per `sessionId`, which preserves the same relay contract as the Node server:
+- `GET /health`
+- `POST /v1/push/session/register-device`
+- `POST /v1/push/session/notify-completion`
 
-- WebSocket path: `/relay/{sessionId}`
-- Required header: `x-role: mac` or `x-role: iphone`
-- Close codes: `4000`, `4001`, `4002`, `4003`, `4004`
+Push is disabled by default. Enable it only when you are ready to wire APNs and the bridge-side `REMODEX_PUSH_SERVICE_URL`, for example with `REMODEX_ENABLE_PUSH_SERVICE=true`.
 
-Deploy it from this folder:
+## Deploy Notes
 
-```sh
-npm install
-wrangler secret put REMODEX_RELAY_KEY
-npm run deploy
-```
-
-After deploy, point the bridge to your Worker URL:
-
-```sh
-REMODEX_RELAY=wss://<your-worker-domain>/relay remodex up
-```
-
-The health check stays available at:
-
-```txt
-https://<your-worker-domain>/health
-```
-
-## Cloudflare Tunnel
-
-If you already run `cloudflared tunnel`, the simplest path is to keep the relay local and expose it through your tunnel.
-
-Start the local relay:
-
-```sh
-npm install
-REMODEX_RELAY_KEY=your-shared-secret npm start
-```
-
-Then start the bridge with the same secret:
-
-```sh
-REMODEX_RELAY=wss://<your-tunnel-domain>/relay \
-REMODEX_RELAY_KEY=your-shared-secret \
-npm start
-```
-
-If you want to keep using the published package instead of the repo checkout:
-
-```sh
-REMODEX_RELAY=wss://<your-tunnel-domain>/relay \
-REMODEX_RELAY_KEY=your-shared-secret \
-remodex up
-```
-
-Without `REMODEX_RELAY_KEY`, the relay stays compatible with the old open behavior.
-
-Start the local relay without auth:
-
-```sh
-npm install
-npm start
-```
-
-That serves:
-
-- `http://127.0.0.1:8787/health`
-- `ws://127.0.0.1:8787/relay/{sessionId}`
-
-Then point your tunnel hostname at `http://127.0.0.1:8787`. After that, use the public hostname in Remodex:
-
-```sh
-REMODEX_RELAY=wss://<your-tunnel-domain>/relay remodex up
-```
+- Keep the real relay base URL in private config such as `REMODEX_RELAY`, not in committed source.
+- Keep APNs credentials in private env vars or protected files (`REMODEX_APNS_*`).
+- Leave `REMODEX_TRUST_PROXY` unset for direct/self-hosted installs. Set it to `true` only when a trusted reverse proxy is forwarding requests to this relay.
+- When `REMODEX_TRUST_PROXY=true`, configure the proxy to send sanitized client IP headers (`X-Real-Ip` and/or appended `X-Forwarded-For`) instead of passing client-supplied values through unchanged.
+- If you expose the relay under a shared-domain prefix such as `/remodex`, have the proxy strip that prefix before forwarding so the Node server still receives `/relay/...` and `/v1/push/...`.
+- The public repo should document the protocol and code, not your real deployed hostname or deploy defaults.
 
 ## Usage
 
-`relay.js` exports:
+```sh
+cd relay
+npm install
+npm start
+```
 
-- `setupRelay(wss)`
-- `getRelayStats()`
-
-It is meant to be attached to a `ws` `WebSocketServer` from your own HTTP server.
+`server.js` exports `createRelayServer()`, and `relay.js` exports the lower-level `setupRelay(wss)` transport primitive if you want to embed the relay in your own server.

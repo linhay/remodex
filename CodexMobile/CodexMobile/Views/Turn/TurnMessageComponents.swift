@@ -10,9 +10,9 @@ import SwiftUI
 import Textual
 import UIKit
 
-// Keep Textual selection out of the scrolling timeline. We expose selection from
-// a dedicated sheet instead, which avoids repeated layout churn while cells scroll.
-private let enablesInlineMarkdownSelectionInTimeline = false
+// Keep Textual selection out of the scrolling timeline. This is shared by both
+// plain markdown rows and Mermaid-interleaved markdown segments.
+let enablesInlineMarkdownSelectionInTimeline = false
 
 // ─── Message content views ──────────────────────────────────────────
 
@@ -619,7 +619,7 @@ struct MessageRow: View, Equatable {
     // Disables timer-driven adornments while the user reads older content.
     var showsStreamingAnimations: Bool = true
     @Environment(\.assistantRevertAction) private var assistantRevertAction
-    @State private var previewAttachment: CodexImageAttachment?
+    @State private var previewImage: PreviewImagePayload?
     @State private var selectableTextSheet: SelectableMessageTextSheetState?
 
     static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
@@ -674,7 +674,9 @@ struct MessageRow: View, Equatable {
             VStack(alignment: .trailing, spacing: 4) {
                 if !message.attachments.isEmpty {
                     UserAttachmentStrip(attachments: message.attachments) { tappedAttachment in
-                        previewAttachment = tappedAttachment
+                        if let image = AttachmentPreviewImageResolver.resolve(tappedAttachment) {
+                            previewImage = PreviewImagePayload(image: image)
+                        }
                     }
                 }
 
@@ -715,10 +717,10 @@ struct MessageRow: View, Equatable {
                 }
             }
         }
-        .fullScreenCover(item: $previewAttachment) { attachment in
-            AttachmentPreviewScreen(
-                image: AttachmentPreviewImageResolver.resolve(attachment),
-                onDismiss: { previewAttachment = nil }
+        .fullScreenCover(item: $previewImage) { payload in
+            ZoomableImagePreviewScreen(
+                payload: payload,
+                onDismiss: { previewImage = nil }
             )
         }
     }
@@ -815,6 +817,7 @@ struct MessageRow: View, Equatable {
     private func assistantView(text: String, renderModel: MessageRowRenderModel) -> some View {
         let commentContent = renderModel.codeCommentContent
         let bodyText = commentContent?.fallbackText ?? text
+        let mermaidContent = renderModel.mermaidContent
 
         return VStack(alignment: .leading, spacing: 8) {
             if let commentContent, commentContent.hasFindings {
@@ -826,11 +829,15 @@ struct MessageRow: View, Equatable {
             }
 
             if !bodyText.isEmpty {
-                MarkdownTextView(
-                    text: bodyText,
-                    profile: .assistantProse,
-                    enablesSelection: enablesInlineMarkdownSelectionInTimeline
-                )
+                if let mermaidContent {
+                    MermaidMarkdownContentView(content: mermaidContent)
+                } else {
+                    MarkdownTextView(
+                        text: bodyText,
+                        profile: .assistantProse,
+                        enablesSelection: enablesInlineMarkdownSelectionInTimeline
+                    )
+                }
             }
 
             if message.isStreaming && showsStreamingAnimations {
@@ -1221,67 +1228,41 @@ private struct CommandExecutionStatusCard: View {
     }
 }
 
-// ─── Attachment Preview ─────────────────────────────────────────────
-
-private struct AttachmentPreviewScreen: View {
-    let image: UIImage?
-    let onDismiss: () -> Void
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Color.black.opacity(0.95)
-                .ignoresSafeArea()
-                .onTapGesture(perform: onDismiss)
-
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(20)
-            } else {
-                Image(systemName: "photo")
-                    .font(AppFont.system(size: 42, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.85))
-            }
-
-            Button(action: {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onDismiss()
-            }) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(AppFont.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.white, .black.opacity(0.6))
-                    .padding(18)
-            }
-            .buttonStyle(.plain)
-        }
-    }
-}
-
 // ─── Typing indicator ───────────────────────────────────────────────
 
 private struct TypingIndicator: View {
     private let dotCount = 3
-    private let dotSize: CGFloat = 6
-    private let spacing: CGFloat = 4
-    private let amplitude: CGFloat = 3
-    private let period: TimeInterval = 0.9
+    private let dotWidth: CGFloat = 4
+    private let dotHeight: CGFloat = 4
+    private let spacing: CGFloat = 5
+    private let duration: TimeInterval = 0.85
+    @State private var isAnimating = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 8.0, paused: false)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: spacing) {
-                ForEach(0..<dotCount, id: \.self) { index in
-                    let phase = (t / period) * (.pi * 2) + Double(index) * 0.6
-                    Circle()
-                        .fill(Color.secondary.opacity(0.5))
-                        .frame(width: dotSize, height: dotSize)
-                        .offset(y: CGFloat(sin(phase)) * amplitude)
-                }
+        HStack(spacing: spacing) {
+            ForEach(0..<dotCount, id: \.self) { index in
+                indicatorDot(delay: Double(index) * 0.14)
             }
         }
+        .onAppear {
+            guard !isAnimating else { return }
+            isAnimating = true
+        }
         .accessibilityHidden(true)
+    }
+
+    // Uses lightweight implicit animation instead of a continuously ticking timeline.
+    private func indicatorDot(delay: Double) -> some View {
+        Capsule(style: .continuous)
+            .fill(Color.secondary.opacity(isAnimating ? 0.55 : 0.2))
+            .frame(width: dotWidth, height: dotHeight)
+            .scaleEffect(isAnimating ? 1 : 0.72)
+            .animation(
+                .easeInOut(duration: duration)
+                    .repeatForever(autoreverses: true)
+                    .delay(delay),
+                value: isAnimating
+            )
     }
 }
 

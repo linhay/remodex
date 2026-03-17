@@ -21,7 +21,7 @@ extension CodexService {
         reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: [])
 
         if activeThreadId == nil {
-            activeThreadId = threads.first(where: { $0.syncState == .live })?.id
+            activeThreadId = firstLiveThreadID()
         }
 
         guard limit == nil else {
@@ -58,19 +58,49 @@ extension CodexService {
         }
     }
 
-    // Starts a new thread and stores it in local state.
+    // Preserves the older startThread symbol used by most call sites and incremental builds.
     func startThread(
         preferredProjectPath: String? = nil,
-        pendingComposerAction: CodexPendingThreadComposerAction? = nil
+        runtimeOverride: CodexThreadRuntimeOverride? = nil
+    ) async throws -> CodexThread {
+        try await startThreadImpl(
+            preferredProjectPath: preferredProjectPath,
+            pendingComposerAction: nil,
+            runtimeOverride: runtimeOverride
+        )
+    }
+
+    // Starts a new thread and seeds a one-shot composer action for the destination thread.
+    func startThread(
+        preferredProjectPath: String? = nil,
+        pendingComposerAction: CodexPendingThreadComposerAction,
+        runtimeOverride: CodexThreadRuntimeOverride? = nil
+    ) async throws -> CodexThread {
+        try await startThreadImpl(
+            preferredProjectPath: preferredProjectPath,
+            pendingComposerAction: pendingComposerAction,
+            runtimeOverride: runtimeOverride
+        )
+    }
+
+    // Starts a new thread and stores it in local state.
+    private func startThreadImpl(
+        preferredProjectPath: String? = nil,
+        pendingComposerAction: CodexPendingThreadComposerAction? = nil,
+        runtimeOverride: CodexThreadRuntimeOverride? = nil
     ) async throws -> CodexThread {
         let normalizedPreferredProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
-        var includesServiceTier = runtimeServiceTierForTurn() != nil
+        // Brand-new chats start from app defaults; per-chat overrides are inherited only on continuation.
+        let explicitServiceTier = runtimeOverride?.overridesServiceTier == true
+            ? runtimeOverride?.serviceTierRawValue
+            : runtimeServiceTierForTurn()
+        var includesServiceTier = explicitServiceTier != nil
 
         while true {
             let params = CodexThreadStartProjectBinding.makeThreadStartParams(
                 modelIdentifier: runtimeModelIdentifierForTurn(),
                 preferredProjectPath: normalizedPreferredProjectPath,
-                serviceTier: includesServiceTier ? runtimeServiceTierForTurn() : nil
+                serviceTier: includesServiceTier ? explicitServiceTier : nil
             )
 
             do {
@@ -89,6 +119,9 @@ extension CodexService {
                 )
                 if let pendingComposerAction {
                     queuePendingComposerAction(pendingComposerAction, for: thread.id)
+                }
+                if let runtimeOverride, !runtimeOverride.isEmpty {
+                    applyThreadRuntimeOverride(runtimeOverride, to: thread.id)
                 }
                 upsertThread(thread)
                 resumedThreadIDs.insert(thread.id)
@@ -591,7 +624,8 @@ extension CodexService {
     }
 
     func createContinuationThread(from archivedThreadId: String) async throws -> CodexThread {
-        let continuationThread = try await startThread()
+        let continuationRuntimeOverride = threadRuntimeOverride(for: archivedThreadId)
+        let continuationThread = try await startThread(runtimeOverride: continuationRuntimeOverride)
         appendSystemMessage(
             threadId: continuationThread.id,
             text: "Continued from archived thread `\(archivedThreadId)`"
@@ -606,12 +640,15 @@ extension CodexService {
         }
 
         if !force, resumedThreadIDs.contains(threadId) {
-            return threads.first(where: { $0.id == threadId })
+            return thread(for: threadId)
         }
 
         var params: RPCObject = [
             "threadId": .string(threadId),
         ]
+        if let workingDirectory = thread(for: threadId)?.gitWorkingDirectory {
+            params["cwd"] = .string(workingDirectory)
+        }
         if let modelIdentifier = runtimeModelIdentifierForTurn() {
             params["model"] = .string(modelIdentifier)
         }
@@ -638,15 +675,18 @@ extension CodexService {
                     let merged = await Task.detached {
                         Self.mergeHistoryMessages(existingMessages, historyMessages, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)
                     }.value
-                    // If a turn started while merging, keep live streaming data.
-                    if !threadHasActiveOrRunningTurn(threadId) || existingMessages.isEmpty {
+                    // Forced resumes are used when reopening a running thread, so merge the
+                    // latest snapshot even mid-run and let mergeHistoryMessages preserve
+                    // existing streaming rows instead of waiting for the final block.
+                    if (force || !threadHasActiveOrRunningTurn(threadId) || existingMessages.isEmpty)
+                        && merged != existingMessages {
                         messagesByThread[threadId] = merged
                         persistMessages()
                         updateCurrentOutput(for: threadId)
                     }
                 }
             }
-        } else if let index = threads.firstIndex(where: { $0.id == threadId }) {
+        } else if let index = threadIndex(for: threadId) {
             threads[index].syncState = .live
         }
 
@@ -733,7 +773,7 @@ extension CodexService {
         var imageURLKey = "url"
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var didDowngradePlanModeForRuntime = false
-        var includesServiceTier = runtimeServiceTierForTurn() != nil
+        var includesServiceTier = runtimeServiceTierForTurn(threadId: threadId) != nil
 
         while true {
             do {
@@ -809,7 +849,8 @@ extension CodexService {
         expectedTurnId: String?,
         attachments: [CodexImageAttachment] = [],
         skillMentions: [CodexTurnSkillMention] = [],
-        shouldAppendUserMessage: Bool = true
+        shouldAppendUserMessage: Bool = true,
+        collaborationMode: CodexCollaborationModeKind? = nil
     ) async throws {
         let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
         let pendingMessageId = shouldAppendUserMessage
@@ -833,11 +874,12 @@ extension CodexService {
 
         var includeStructuredSkillItems = supportsStructuredSkillInput && !skillMentions.isEmpty
         var imageURLKey = "url"
+        var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var currentExpectedTurnID = initialTurnID
         var didRetryWithRefreshedTurnID = false
 
         while true {
-            let params: RPCObject = [
+            var params: RPCObject = [
                 "threadId": .string(normalizedThreadID),
                 "expectedTurnId": .string(currentExpectedTurnID),
                 "input": .array(
@@ -850,6 +892,12 @@ extension CodexService {
                     )
                 ),
             ]
+            if let collaborationModePayload = try buildCollaborationModePayload(
+                for: effectiveCollaborationMode,
+                threadId: normalizedThreadID
+            ) {
+                params["collaborationMode"] = collaborationModePayload
+            }
 
             do {
                 let response = try await sendRequest(method: "turn/steer", params: .object(params))
@@ -878,6 +926,14 @@ extension CodexService {
                    !attachments.isEmpty,
                    shouldRetryTurnStartWithImageURLField(error) {
                     imageURLKey = "image_url"
+                    continue
+                }
+
+                if effectiveCollaborationMode != nil,
+                   shouldRetryTurnStartWithoutCollaborationMode(error) {
+                    // Keep steer compatible with runtimes that only support plain turns.
+                    supportsTurnCollaborationMode = false
+                    effectiveCollaborationMode = nil
                     continue
                 }
 
@@ -1012,21 +1068,27 @@ extension CodexService {
         if let modelIdentifier = runtimeModelIdentifierForTurn() {
             params["model"] = .string(modelIdentifier)
         }
-        if let effort = selectedReasoningEffortForSelectedModel() {
+        if let effort = selectedReasoningEffortForSelectedModel(threadId: threadId) {
             params["effort"] = .string(effort)
         }
         if includeServiceTier,
-           let serviceTier = runtimeServiceTierForTurn() {
+           let serviceTier = runtimeServiceTierForTurn(threadId: threadId) {
             params["serviceTier"] = .string(serviceTier)
         }
-        if let collaborationModePayload = try buildCollaborationModePayload(for: collaborationMode) {
+        if let collaborationModePayload = try buildCollaborationModePayload(
+            for: collaborationMode,
+            threadId: threadId
+        ) {
             params["collaborationMode"] = collaborationModePayload
         }
         return params
     }
 
     // Encodes collaborationMode while allowing the selected mode to supply built-in instructions.
-    func buildCollaborationModePayload(for mode: CodexCollaborationModeKind?) throws -> JSONValue? {
+    func buildCollaborationModePayload(
+        for mode: CodexCollaborationModeKind?,
+        threadId: String?
+    ) throws -> JSONValue? {
         guard let mode else {
             return nil
         }
@@ -1046,7 +1108,9 @@ extension CodexService {
             "mode": .string(mode.rawValue),
             "settings": .object([
                 "model": .string(resolvedModel),
-                "reasoning_effort": selectedReasoningEffortForSelectedModel().map(JSONValue.string) ?? .null,
+                "reasoning_effort": selectedReasoningEffortForSelectedModel(
+                    threadId: threadId
+                ).map(JSONValue.string) ?? .null,
                 "developer_instructions": .null,
             ]),
         ])
@@ -1094,7 +1158,7 @@ extension CodexService {
             beginAssistantMessage(threadId: threadId, turnId: turnID)
         }
 
-        if let index = threads.firstIndex(where: { $0.id == threadId }) {
+        if let index = threadIndex(for: threadId) {
             threads[index].updatedAt = Date()
             threads[index].syncState = .live
             threads = sortThreads(threads)

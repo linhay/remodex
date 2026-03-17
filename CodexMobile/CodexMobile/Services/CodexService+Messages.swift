@@ -34,6 +34,7 @@ extension CodexService {
     func removeThreadTimelineState(for threadId: String) {
         threadTimelineStateByThread.removeValue(forKey: threadId)
         stoppedTurnIDsByThread.removeValue(forKey: threadId)
+        messageIndexCacheByThread.removeValue(forKey: threadId)
         latestAssistantOutputByThread.removeValue(forKey: threadId)
         latestRepoAffectingMessageSignalByThread.removeValue(forKey: threadId)
         assistantRevertStateCacheByThread.removeValue(forKey: threadId)
@@ -44,6 +45,7 @@ extension CodexService {
     func removeAllThreadTimelineState() {
         threadTimelineStateByThread.removeAll()
         stoppedTurnIDsByThread.removeAll()
+        messageIndexCacheByThread.removeAll()
         latestAssistantOutputByThread.removeAll()
         latestRepoAffectingMessageSignalByThread.removeAll()
         assistantRevertStateCacheByThread.removeAll()
@@ -53,11 +55,7 @@ extension CodexService {
     func updateCurrentOutput(for threadId: String) {
         noteMessagesChanged(for: threadId)
 
-        let latestAssistantText = messagesByThread[threadId]?
-            .reversed()
-            .first(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
-            .text ?? ""
-        latestAssistantOutputByThread[threadId] = latestAssistantText
+        let latestAssistantText = syncLatestAssistantOutputCache(for: threadId)
         refreshThreadTimelineState(for: threadId)
 
         guard activeThreadId == threadId else {
@@ -65,6 +63,53 @@ extension CodexService {
         }
 
         currentOutput = latestAssistantText
+    }
+
+    // Fast-paths plain assistant text streaming so one delta does not rebuild every derived row cache.
+    // Falls back to the full projection path whenever the visible snapshot shape changed underneath us.
+    func updateStreamingAssistantOutput(for threadId: String, messageId: String, rawMessageIndex: Int? = nil) {
+        noteMessagesChanged(for: threadId)
+
+        // Keep the visible output anchored to the latest assistant bubble, even if a late
+        // delta updates an older item inside the same turn.
+        let latestAssistantText = syncLatestAssistantOutputCache(for: threadId)
+        if activeThreadId == threadId {
+            currentOutput = latestAssistantText
+        }
+
+        guard let state = threadTimelineStateByThread[threadId],
+              let rawMessages = messagesByThread[threadId],
+              let updatedMessageIndex = resolvedMessageIndex(
+                  threadId: threadId,
+                  messageId: messageId,
+                  preferredIndex: rawMessageIndex,
+                  in: rawMessages
+              ),
+              rawMessages.indices.contains(updatedMessageIndex),
+              rawMessages[updatedMessageIndex].id == messageId,
+              let projectedIndex = state.renderSnapshot.messages.firstIndex(where: { $0.id == messageId }) else {
+            refreshThreadTimelineState(for: threadId)
+            return
+        }
+        let updatedMessage = rawMessages[updatedMessageIndex]
+
+        let revision = messageRevisionByThread[threadId] ?? 0
+        var projectedMessages = state.renderSnapshot.messages
+        projectedMessages[projectedIndex] = updatedMessage
+
+        state.messages = rawMessages
+        state.messageRevision = revision
+        state.renderSnapshot = TurnTimelineRenderSnapshot(
+            threadID: threadId,
+            messages: projectedMessages,
+            timelineChangeToken: revision,
+            activeTurnID: state.renderSnapshot.activeTurnID,
+            isThreadRunning: state.renderSnapshot.isThreadRunning,
+            latestTurnTerminalState: state.renderSnapshot.latestTurnTerminalState,
+            stoppedTurnIDs: state.renderSnapshot.stoppedTurnIDs,
+            assistantRevertStatesByMessageID: state.renderSnapshot.assistantRevertStatesByMessageID,
+            repoRefreshSignal: state.renderSnapshot.repoRefreshSignal
+        )
     }
 
     // Returns the currently running turn id for a specific thread, if any.
@@ -94,10 +139,24 @@ extension CodexService {
         refreshThreadTimelineState(for: threadId)
     }
 
+    // Marks a rollout-mirrored run for extra thread/resume catch-up until a real
+    // assistant delta arrives or the turn completes.
+    func markMirroredRunningCatchupNeeded(for threadId: String) {
+        mirroredRunningCatchupThreadIDs.insert(threadId)
+        lastMirroredRunningCatchupAtByThread.removeValue(forKey: threadId)
+    }
+
+    // Stops extra catch-up polling once a live assistant stream exists or the run ends.
+    func clearMirroredRunningCatchupNeeded(for threadId: String) {
+        mirroredRunningCatchupThreadIDs.remove(threadId)
+        lastMirroredRunningCatchupAtByThread.removeValue(forKey: threadId)
+    }
+
     // Clears running/fallback flags together when a thread finishes or disappears.
     func clearRunningState(for threadId: String) {
         runningThreadIDs.remove(threadId)
         protectedRunningFallbackThreadIDs.remove(threadId)
+        clearMirroredRunningCatchupNeeded(for: threadId)
         refreshBusyRepoRootsAndDependentTimelineStates()
         refreshThreadTimelineState(for: threadId)
     }
@@ -106,7 +165,11 @@ extension CodexService {
     func clearAllRunningState() {
         runningThreadIDs.removeAll()
         protectedRunningFallbackThreadIDs.removeAll()
+        mirroredRunningCatchupThreadIDs.removeAll()
+        lastMirroredRunningCatchupAtByThread.removeAll()
         refreshBusyRepoRootsAndDependentTimelineStates()
+        // Always refresh all threads: threads without a gitWorkingDirectory won't appear in
+        // changedRoots but still need their isThreadRunning flag updated after clearing.
         refreshAllThreadTimelineStates()
     }
 
@@ -222,13 +285,14 @@ extension CodexService {
     }
 
     // Sets the active thread and lazily hydrates old messages from server history.
-    func prepareThreadForDisplay(threadId: String) async {
+    @discardableResult
+    func prepareThreadForDisplay(threadId: String) async -> Bool {
         activeThreadId = threadId
         markThreadAsViewed(threadId)
         updateCurrentOutput(for: threadId)
 
         guard isConnected else {
-            return
+            return true
         }
 
         do {
@@ -236,24 +300,31 @@ extension CodexService {
         } catch {
             if shouldTreatAsThreadNotFound(error) {
                 handleMissingThread(threadId)
-                return
             }
+            return false
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            return false
+        }
 
         // Rehydrate in-flight turn metadata after reconnect/background transitions.
         // Without this refresh, stop-state can disappear until a new live event arrives.
         await refreshInFlightTurnState(threadId: threadId)
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            return false
+        }
 
         if threadHasActiveOrRunningTurn(threadId) {
             // When reopening a running thread, force a fresh resume snapshot so the
             // timeline catches up with output produced while the thread was off-screen.
             _ = try? await ensureThreadResumed(threadId: threadId, force: true)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else {
+                return false
+            }
             updateCurrentOutput(for: threadId)
         }
         requestImmediateSync(threadId: threadId)
+        return true
     }
 
     // Starts a short-lived watch for a running thread that just went off-screen.
@@ -330,11 +401,10 @@ extension CodexService {
 
         extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
 
-        // A turn may have started while the thread/read request was in flight.
-        // Merging stale history would overwrite live streaming text and clear
-        // isStreaming flags, causing messages to flicker (disappear then reappear).
-        // Skip the merge and let the active turn's streaming deltas be authoritative.
-        if threadHasActiveOrRunningTurn(threadId) {
+        // A turn may have started while thread/read was in flight. Normal background
+        // history loads should still stay out of the way, but forced refreshes are
+        // used when reopening a running thread and need to merge the latest snapshot.
+        if threadHasActiveOrRunningTurn(threadId) && !forceRefresh {
             hydratedThreadIDs.insert(threadId)
             return
         }
@@ -347,16 +417,18 @@ extension CodexService {
             let merged = await Task.detached {
                 Self.mergeHistoryMessages(existingMessages, historyMessages, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)
             }.value
-            guard !threadHasActiveOrRunningTurn(threadId) else {
+            guard forceRefresh || !threadHasActiveOrRunningTurn(threadId) else {
                 hydratedThreadIDs.insert(threadId)
                 return
             }
-            messagesByThread[threadId] = merged
-            persistMessages()
+            if merged != existingMessages {
+                messagesByThread[threadId] = merged
+                persistMessages()
+                updateCurrentOutput(for: threadId)
+            }
         }
 
         hydratedThreadIDs.insert(threadId)
-        updateCurrentOutput(for: threadId)
     }
 
     // Extracts context window usage from thread/read response if the runtime includes it.
@@ -389,6 +461,56 @@ extension CodexService {
         )
         appendMessage(message)
         return message.id
+    }
+
+    // Upserts a confirmed user row mirrored from a desktop-origin rollout so
+    // reopened threads can display the remote prompt immediately without
+    // disturbing the phone-native pending-send path.
+    func appendConfirmedMirroredUserMessage(
+        threadId: String,
+        turnId: String?,
+        text: String
+    ) {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedIncomingText = Self.normalizedMessageText(trimmedText)
+        guard !trimmedText.isEmpty else {
+            return
+        }
+
+        if let existingIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
+            candidate.role == .user
+                && Self.normalizedMessageText(candidate.text) == normalizedIncomingText
+                && (
+                    (turnId != nil && (candidate.turnId == nil || candidate.turnId == turnId))
+                        || (turnId == nil && candidate.turnId == nil)
+                )
+        }) {
+            var didMutate = false
+            if messagesByThread[threadId]?[existingIndex].deliveryState != .confirmed {
+                messagesByThread[threadId]?[existingIndex].deliveryState = .confirmed
+                didMutate = true
+            }
+            if messagesByThread[threadId]?[existingIndex].turnId == nil {
+                messagesByThread[threadId]?[existingIndex].turnId = turnId
+                didMutate = true
+            }
+            guard didMutate else {
+                return
+            }
+            persistMessages()
+            updateCurrentOutput(for: threadId)
+            return
+        }
+
+        appendMessage(
+            CodexMessage(
+                threadId: threadId,
+                role: .user,
+                text: trimmedText,
+                turnId: turnId,
+                deliveryState: .confirmed
+            )
+        )
     }
 
     // Appends a system message in the current thread timeline.
@@ -1386,17 +1508,26 @@ extension CodexService {
         }
 
         let currentText = messagesByThread[threadId]?[messageIndex].text ?? ""
-        messagesByThread[threadId]?[messageIndex].text = mergeAssistantDelta(
+        let nextText = mergeAssistantDelta(
             existingText: currentText,
             incomingDelta: delta
         )
+        let didResolveItemId = messagesByThread[threadId]?[messageIndex].itemId == nil && itemId != nil
+
+        guard nextText != currentText
+                || !(messagesByThread[threadId]?[messageIndex].isStreaming ?? false)
+                || didResolveItemId else {
+            return
+        }
+
+        messagesByThread[threadId]?[messageIndex].text = nextText
         messagesByThread[threadId]?[messageIndex].isStreaming = true
         if messagesByThread[threadId]?[messageIndex].itemId == nil, let itemId {
             messagesByThread[threadId]?[messageIndex].itemId = itemId
         }
 
         persistMessages()
-        updateCurrentOutput(for: threadId)
+        updateStreamingAssistantOutput(for: threadId, messageId: messageID, rawMessageIndex: messageIndex)
     }
 
     // Finalizes assistant text when item/completed carries the canonical message body.
@@ -1701,7 +1832,6 @@ extension CodexService {
         activeTurnIdByThread.removeAll()
         threadsPendingCompletionHaptic.removeAll()
         clearAllRunningState()
-        refreshAllThreadTimelineStates()
         streamingAssistantMessageByTurnID.removeAll()
         streamingSystemMessageByItemID.removeAll()
         threadIdByTurnID.removeAll()
@@ -1717,12 +1847,17 @@ extension CodexService {
 
 extension CodexService {
     func persistMessages() {
-        let snapshot = messagesByThread
         messagePersistenceDebounceTask?.cancel()
-        messagePersistenceDebounceTask = Task.detached { [messagePersistence] in
+        messagePersistenceDebounceTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled else { return }
-            messagePersistence.save(snapshot)
+            guard !Task.isCancelled, let self else { return }
+
+            let snapshot = self.messagesByThread
+            self.messagePersistenceDebounceTask = nil
+
+            Task.detached { [messagePersistence] in
+                messagePersistence.save(snapshot)
+            }
         }
     }
 }
@@ -1732,7 +1867,7 @@ extension CodexService {
 extension CodexService {
     // Reuses the sidebar "ready" signal to surface a lightweight in-app banner for off-screen chats.
     func presentThreadCompletionBannerIfNeeded(threadId: String) {
-        guard let thread = threads.first(where: { $0.id == threadId }) else {
+        guard let thread = thread(for: threadId) else {
             return
         }
 
@@ -1745,6 +1880,15 @@ extension CodexService {
     // Bumps a thread-local revision whenever its message timeline changes.
     func noteMessagesChanged(for threadId: String) {
         messageRevisionByThread[threadId, default: 0] &+= 1
+    }
+
+    // Keeps the "latest output" cache in sync for both full refreshes and lightweight streaming updates.
+    func syncLatestAssistantOutputCache(for threadId: String) -> String {
+        let latestAssistantText = messagesByThread[threadId]?
+            .last(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
+            .text ?? ""
+        latestAssistantOutputByThread[threadId] = latestAssistantText
+        return latestAssistantText
     }
 
     // Rebuilds one thread's render snapshot from service-owned caches after any timeline mutation.
@@ -1795,7 +1939,10 @@ extension CodexService {
     }
 
     // Recomputes which repos are currently busy so revert buttons update without scanning all threads per row.
-    func refreshBusyRepoRootsAndDependentTimelineStates() {
+    // Returns true if busy-roots actually changed and dependent timelines were refreshed.
+    @discardableResult
+    func refreshBusyRepoRootsAndDependentTimelineStates() -> Bool {
+        let previousBusyRepoRoots = busyRepoRoots
         let nextBusyRepoRoots = Set(
             threads.compactMap { thread -> String? in
                 guard runningThreadIDs.contains(thread.id)
@@ -1808,13 +1955,25 @@ extension CodexService {
             }
         )
 
-        guard nextBusyRepoRoots != busyRepoRoots else {
-            return
+        guard nextBusyRepoRoots != previousBusyRepoRoots else {
+            return false
         }
 
         busyRepoRoots = nextBusyRepoRoots
         busyRepoRootsRevision &+= 1
-        refreshAllThreadTimelineStates()
+
+        // Only refresh threads whose repo is in the changed set, not all threads.
+        let changedRoots = previousBusyRepoRoots.symmetricDifference(nextBusyRepoRoots)
+        let workingDirByThread: [String: String?] = Dictionary(
+            uniqueKeysWithValues: threads.map { ($0.id, $0.gitWorkingDirectory) }
+        )
+        for threadId in threadTimelineStateByThread.keys {
+            let workingDir = workingDirByThread[threadId] ?? nil
+            let repoId = canonicalRepoIdentifier(for: workingDir) ?? workingDir
+            guard let repoId, changedRoots.contains(repoId) else { continue }
+            refreshThreadTimelineState(for: threadId)
+        }
+        return true
     }
 
     // Keeps stopped-turn lookup thread-local so scroll/render code never rescans full transcripts.
@@ -1885,9 +2044,26 @@ extension CodexService {
 
     // Invalidates revert presentations globally because sibling threads can change file-overlap risk.
     func invalidateAssistantRevertStates() {
+        invalidateAssistantRevertStatesWithoutRefresh()
+        scheduleCoalescedRevertRefresh()
+    }
+
+    // Bumps the revert revision and clears cache without triggering a full timeline refresh.
+    // Callers that already perform their own refresh (e.g. rememberRepoRoot) use this to avoid double work.
+    func invalidateAssistantRevertStatesWithoutRefresh() {
         assistantRevertStateRevision &+= 1
         assistantRevertStateCacheByThread.removeAll(keepingCapacity: true)
-        refreshAllThreadTimelineStates()
+    }
+
+    // Coalesces multiple revert invalidation calls within the same run loop tick into a single
+    // refreshAllThreadTimelineStates(). The Task yields once, so back-to-back callers collapse.
+    func scheduleCoalescedRevertRefresh() {
+        coalescedRevertRefreshTask?.cancel()
+        coalescedRevertRefreshTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled, let self else { return }
+            self.refreshAllThreadTimelineStates()
+        }
     }
 
     // Mirrors the stop-button teardown moment with a single success haptic when a live run really finishes.
@@ -1961,7 +2137,37 @@ extension CodexService {
     }
 
     func findMessageIndex(threadId: String, messageId: String) -> Int? {
-        messagesByThread[threadId]?.firstIndex(where: { $0.id == messageId })
+        guard let messages = messagesByThread[threadId] else {
+            return nil
+        }
+
+        if let cachedIndex = messageIndexCacheByThread[threadId]?[messageId],
+           messages.indices.contains(cachedIndex),
+           messages[cachedIndex].id == messageId {
+            return cachedIndex
+        }
+
+        let rebuiltIndex = Dictionary(
+            uniqueKeysWithValues: messages.enumerated().map { ($0.element.id, $0.offset) }
+        )
+        messageIndexCacheByThread[threadId] = rebuiltIndex
+        return rebuiltIndex[messageId]
+    }
+
+    // Reuses a caller-provided index when still valid, otherwise falls back to the cached lookup map.
+    func resolvedMessageIndex(
+        threadId: String,
+        messageId: String,
+        preferredIndex: Int?,
+        in messages: [CodexMessage]
+    ) -> Int? {
+        if let preferredIndex,
+           messages.indices.contains(preferredIndex),
+           messages[preferredIndex].id == messageId {
+            return preferredIndex
+        }
+
+        return findMessageIndex(threadId: threadId, messageId: messageId)
     }
 
     func findLatestPlanMessageIndex(threadId: String, turnId: String?, itemId: String?) -> Int? {
@@ -2145,6 +2351,7 @@ extension CodexService {
             return existingText
         }
 
+        // Preserve reconnect/replay correctness by checking the full overlap window.
         let maxOverlap = min(existingText.count, incomingDelta.count)
         if maxOverlap > 0 {
             for overlap in stride(from: maxOverlap, through: 1, by: -1) {

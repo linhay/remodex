@@ -6,11 +6,11 @@
 
 import AVFoundation
 import SwiftUI
+import UIKit
 
 struct QRScannerView: View {
     let onScan: (CodexPairingQRPayload) -> Void
 
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = QRScannerViewModel()
 
@@ -18,21 +18,21 @@ struct QRScannerView: View {
         @Bindable var viewModel = viewModel
 
         ZStack {
-            Color.black.ignoresSafeArea()
+            LinearGradient(
+                colors: [
+                    Color(.systemBackground),
+                    Color(.secondarySystemBackground),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
 
             if viewModel.isCheckingPermission {
                 ProgressView()
-                    .tint(.white)
+                    .tint(.primary)
             } else if viewModel.hasCameraPermission {
-                QRCameraPreview(
-                    isSessionActive: isCameraSessionActive,
-                    onScan: { code, resetScanLock in
-                    handleScanResult(code, resetScanLock: resetScanLock)
-                    }
-                )
-                .ignoresSafeArea()
-
-                scannerOverlay
+                scannerContent
             } else {
                 cameraPermissionView
             }
@@ -67,61 +67,143 @@ struct QRScannerView: View {
         )
     }
 
-    private var scannerOverlay: some View {
-        ZStack(alignment: .bottomLeading) {
-            VStack(spacing: 24) {
+    private var scannerContent: some View {
+        GeometryReader { geometry in
+            let width = min(geometry.size.width - 32, 420)
+            let scannerHeight = min(max(geometry.size.height * 0.5, 320), 520)
+
+            VStack(spacing: 16) {
+                headerCard
+
+                ZStack {
+                    QRCameraPreview(
+                        isSessionActive: isCameraSessionActive,
+                        onScan: { code, resetScanLock in
+                            handleScanResult(code, resetScanLock: resetScanLock)
+                        }
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .stroke(Color.white.opacity(0.25), lineWidth: 1)
+
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.white.opacity(0.85), style: StrokeStyle(lineWidth: 2, dash: [10, 8]))
+                        .frame(width: min(width * 0.68, 260), height: min(width * 0.68, 260))
+
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Text("Align the full QR code in frame")
+                                .font(AppFont.caption(weight: .medium))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(.black.opacity(0.45), in: Capsule())
+                            Spacer()
+                        }
+                        .padding(14)
+                    }
+                }
+                .frame(width: width, height: scannerHeight)
+                .shadow(color: Color.black.opacity(0.18), radius: 18, y: 10)
+
+                actionStrip
+                    .frame(width: width)
+
+                Spacer(minLength: 12)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .padding(.top, 14)
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private var headerCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Pair Your Mac")
+                    .font(AppFont.title3(weight: .semibold))
                 Spacer()
-
-                RoundedRectangle(cornerRadius: 20)
-                    .stroke(Color.white.opacity(0.6), lineWidth: 2)
-                    .frame(width: 250, height: 250)
-
-                Text("Scan QR code from Remodex CLI")
-                    .font(AppFont.subheadline(weight: .medium))
-                    .foregroundStyle(.white)
-
-                Spacer()
+                Text("Secure")
+                    .font(AppFont.caption(weight: .semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .foregroundStyle(.green)
+                    .background(Color.green.opacity(0.12), in: Capsule())
             }
 
-            FloatingIconCircleButton(
-                systemImage: "keyboard",
-                colorScheme: colorScheme,
-                accessibilityLabel: "Use Pairing Code",
-                action: { viewModel.isShowingManualEntry = true }
-            )
-            .padding(.leading, 20)
-            .padding(.bottom, 28)
+            Text("Scan the QR code shown by `remodex up` on your Mac.")
+                .font(AppFont.subheadline())
+                .foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(.tertiarySystemFill).opacity(0.55))
+        )
+    }
+
+    private var actionStrip: some View {
+        HStack(spacing: 10) {
+            Button {
+                viewModel.isShowingManualEntry = true
+            } label: {
+                Label("Use Pairing Code", systemImage: "keyboard")
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                attemptSimulatorClipboardPairing()
+            } label: {
+                Label("Paste", systemImage: "doc.on.clipboard")
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
         }
     }
 
     private var cameraPermissionView: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "camera.fill")
-                .font(.system(size: 48))
+        VStack(spacing: 16) {
+            Image(systemName: "camera.viewfinder")
+                .font(.system(size: 46, weight: .medium))
                 .foregroundStyle(.secondary)
 
-            Text("Camera access needed")
+            Text("Camera Access Needed")
                 .font(AppFont.title3(weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
 
-            Text("Open Settings and allow camera access to scan the pairing QR code.")
+            Text("Enable camera permission in iOS Settings, or continue with manual pairing code.")
                 .font(AppFont.subheadline())
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 40)
+                .padding(.horizontal, 20)
 
-            Button("Open Settings") {
-                if let url = URL(string: UIApplication.openSettingsURLString) {
-                    UIApplication.shared.open(url)
+            HStack(spacing: 10) {
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
                 }
-            }
-            .buttonStyle(.borderedProminent)
+                .buttonStyle(.borderedProminent)
 
-            Button("Use Pairing Code Instead") {
-                viewModel.isShowingManualEntry = true
+                Button("Use Pairing Code") {
+                    viewModel.isShowingManualEntry = true
+                }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.bordered)
         }
+        .padding(22)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color(.tertiarySystemFill).opacity(0.6))
+        )
+        .padding(.horizontal, 20)
     }
 
     private func checkCameraPermission() async {
@@ -148,30 +230,36 @@ struct QRScannerView: View {
 
     private var manualEntrySheet: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Paste the full pairing payload from the Remodex CLI QR output.")
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Paste the full pairing payload printed by `remodex up`.")
                     .font(AppFont.subheadline())
                     .foregroundStyle(.secondary)
 
                 TextEditor(text: $viewModel.manualEntryText)
                     .font(AppFont.mono(.caption))
                     .padding(12)
-                    .frame(minHeight: 220)
+                    .frame(minHeight: 210)
                     .background(
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .fill(Color(.secondarySystemBackground))
                     )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color(.separator), lineWidth: 1)
+                    )
 
-                Button("Paste from Clipboard") {
-                    viewModel.manualEntryText = UIPasteboard.general.string ?? ""
-                }
-                .buttonStyle(.bordered)
+                HStack(spacing: 10) {
+                    Button("Paste from Clipboard") {
+                        viewModel.manualEntryText = UIPasteboard.general.string ?? ""
+                    }
+                    .buttonStyle(.bordered)
 
-                Button("Connect") {
-                    submitManualEntry()
+                    Button("Connect") {
+                        submitManualEntry()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!viewModel.canSubmitManualEntry)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!viewModel.canSubmitManualEntry)
 
                 Spacer()
             }
@@ -203,12 +291,21 @@ struct QRScannerView: View {
     }
 
     private func attemptSimulatorClipboardPairing() {
+        guard let clipboardValue = UIPasteboard.general.string else {
+            return
+        }
+
         #if targetEnvironment(simulator)
-        guard let clipboardValue = UIPasteboard.general.string,
-              let payload = try? decodePairingPayload(from: clipboardValue) else {
+        guard let payload = try? decodePairingPayload(from: clipboardValue) else {
             return
         }
         onScan(payload)
+        #else
+        if let payload = try? decodePairingPayload(from: clipboardValue) {
+            onScan(payload)
+        } else {
+            viewModel.scannerError = "Clipboard does not contain a valid pairing payload."
+        }
         #endif
     }
 }

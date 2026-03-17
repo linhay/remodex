@@ -36,13 +36,17 @@ function runScriptWithEnv(args, envOverrides) {
 test("LAN mode binds relay on 0.0.0.0 in dry-run output", () => {
   const output = runScript(["--dry-run"]);
   assert.match(output, /HOST=0\.0\.0\.0/);
-  assert.match(output, /ws:\/\/.*:8787\/relay/);
+  assert.match(output, /REMODEX_RELAY=ws:\/\/127\.0\.0\.1:8787\/relay/);
+  assert.match(output, /REMODEX_PAIRING_RELAY=ws:\/\/.*:8787\/relay/);
 });
 
 test("Cloudflare mode binds relay on 127.0.0.1 in dry-run output", () => {
   const output = runScript(["--cloudflare", "--dry-run"]);
   assert.match(output, /HOST=127\.0\.0\.1/);
   assert.match(output, /cloudflared tunnel --protocol http2 --url http:\/\/127\.0\.0\.1:8787/);
+  assert.match(output, /REMODEX_RELAY=ws:\/\/127\.0\.0\.1:8787\/relay/);
+  assert.match(output, /REMODEX_PAIRING_RELAY=wss:\/\//);
+  assert.match(output, /trycloudflare-host/);
 });
 
 test("custom relay URL skips cloudflared and uses the fixed public relay", () => {
@@ -52,7 +56,8 @@ test("custom relay URL skips cloudflared and uses the fixed public relay", () =>
     "--dry-run",
   ]);
   assert.doesNotMatch(output, /cloudflared tunnel/);
-  assert.match(output, /REMODEX_RELAY=wss:\/\/relay\.example\.com\/relay/);
+  assert.match(output, /REMODEX_RELAY=ws:\/\/127\.0\.0\.1:8787\/relay/);
+  assert.match(output, /REMODEX_PAIRING_RELAY=wss:\/\/relay\.example\.com\/relay/);
   assert.match(output, /REMODEX_RELAY_CANDIDATES=/);
 });
 
@@ -65,7 +70,8 @@ test("named tunnel token file starts cloudflared with token file and fixed relay
     "--dry-run",
   ]);
   assert.match(output, /cloudflared tunnel --protocol http2 --url http:\/\/127\.0\.0\.1:8787 run --token-file \/tmp\/remodex\.token/);
-  assert.match(output, /REMODEX_RELAY=wss:\/\/relay\.example\.com\/relay/);
+  assert.match(output, /REMODEX_RELAY=ws:\/\/127\.0\.0\.1:8787\/relay/);
+  assert.match(output, /REMODEX_PAIRING_RELAY=wss:\/\/relay\.example\.com\/relay/);
   assert.doesNotMatch(output, /trycloudflare/);
 });
 

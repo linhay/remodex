@@ -88,6 +88,27 @@ PY
   return 1
 }
 
+detect_primary_lan_ip() {
+  local iface ip
+  iface="$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')"
+  if [[ -n "$iface" ]]; then
+    ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+    if [[ -n "$ip" ]]; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  fi
+
+  for iface in en0 en1 bridge0; do
+    ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+    if [[ -n "$ip" ]]; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
 RELAY_KEY="${REMODEX_RELAY_KEY:-}"
 USE_CLOUDFLARE="false"
 DRY_RUN="false"
@@ -282,9 +303,22 @@ if [[ -z "$LAN_HOSTNAME_VALUE" ]]; then
 fi
 LAN_RELAY_URL="ws://$LAN_HOSTNAME_VALUE:$RELAY_PORT/relay"
 
-RELAY_CANDIDATES="$RELAY_URL"
+LAN_IP_VALUE="$(detect_primary_lan_ip 2>/dev/null || true)"
+LAN_IP_RELAY_URL=""
+if [[ -n "$LAN_IP_VALUE" ]]; then
+  LAN_IP_RELAY_URL="ws://$LAN_IP_VALUE:$RELAY_PORT/relay"
+fi
+
+# Bridge always connects locally; iPhone chooses between pairing relay candidates.
+BRIDGE_RELAY_URL="ws://127.0.0.1:$RELAY_PORT/relay"
+PAIRING_RELAY_URL="$RELAY_URL"
+
+RELAY_CANDIDATES="$PAIRING_RELAY_URL"
 if [[ "$LAN_RELAY_URL" != "$RELAY_URL" ]]; then
   RELAY_CANDIDATES="$RELAY_CANDIDATES,$LAN_RELAY_URL"
+fi
+if [[ -n "$LAN_IP_RELAY_URL" && "$LAN_IP_RELAY_URL" != "$PAIRING_RELAY_URL" && "$LAN_IP_RELAY_URL" != "$LAN_RELAY_URL" ]]; then
+  RELAY_CANDIDATES="$RELAY_CANDIDATES,$LAN_IP_RELAY_URL"
 fi
 
 BRIDGE_PAIRING_CODE_ENV=""
@@ -294,14 +328,15 @@ else
   BRIDGE_PAIRING_CODE_ENV="${REMODEX_PRINT_PAIRING_CODE:-false}"
 fi
 
-print_cmd bash -lc "cd $(printf '%q' "$BRIDGE_DIR") && REMODEX_RELAY=$(printf '%q' "$RELAY_URL") REMODEX_RELAY_CANDIDATES=$(printf '%q' "$RELAY_CANDIDATES") REMODEX_RELAY_KEY=$(printf '%q' "$RELAY_KEY") REMODEX_QR_MODE=$(printf '%q' "$QR_MODE") REMODEX_PRINT_PAIRING_CODE=$(printf '%q' "$BRIDGE_PAIRING_CODE_ENV") node ./bin/remodex.js up"
+print_cmd bash -lc "cd $(printf '%q' "$BRIDGE_DIR") && REMODEX_RELAY=$(printf '%q' "$BRIDGE_RELAY_URL") REMODEX_PAIRING_RELAY=$(printf '%q' "$PAIRING_RELAY_URL") REMODEX_RELAY_CANDIDATES=$(printf '%q' "$RELAY_CANDIDATES") REMODEX_RELAY_KEY=$(printf '%q' "$RELAY_KEY") REMODEX_QR_MODE=$(printf '%q' "$QR_MODE") REMODEX_PRINT_PAIRING_CODE=$(printf '%q' "$BRIDGE_PAIRING_CODE_ENV") node ./bin/remodex.js up"
 
 if [[ "$DRY_RUN" == "true" ]]; then
   exit 0
 fi
 
 cd "$BRIDGE_DIR"
-REMODEX_RELAY="$RELAY_URL" \
+REMODEX_RELAY="$BRIDGE_RELAY_URL" \
+REMODEX_PAIRING_RELAY="$PAIRING_RELAY_URL" \
 REMODEX_RELAY_CANDIDATES="$RELAY_CANDIDATES" \
 REMODEX_RELAY_KEY="$RELAY_KEY" \
 REMODEX_QR_MODE="$QR_MODE" \

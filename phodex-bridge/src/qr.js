@@ -14,6 +14,8 @@ function printQR(pairingPayload) {
   console.log(`\nSession ID: ${pairingPayload.sessionId}`);
   console.log(`Device ID: ${pairingPayload.macDeviceId}`);
   console.log(`Expires: ${new Date(pairingPayload.expiresAt).toISOString()}\n`);
+  console.log("QR Payload (copy/paste):");
+  console.log(`${payload}\n`);
 }
 
 module.exports = { printQR };

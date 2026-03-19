@@ -309,7 +309,7 @@ extension CodexService {
 
         // Rehydrate in-flight turn metadata after reconnect/background transitions.
         // Without this refresh, stop-state can disappear until a new live event arrives.
-        await refreshInFlightTurnState(threadId: threadId)
+        _ = await refreshInFlightTurnState(threadId: threadId)
         guard !Task.isCancelled else {
             return false
         }
@@ -1853,11 +1853,10 @@ extension CodexService {
             guard !Task.isCancelled, let self else { return }
 
             let snapshot = self.messagesByThread
+            let persistence = self.messagePersistence
             self.messagePersistenceDebounceTask = nil
 
-            Task.detached { [messagePersistence] in
-                messagePersistence.save(snapshot)
-            }
+            persistence.save(snapshot)
         }
     }
 }

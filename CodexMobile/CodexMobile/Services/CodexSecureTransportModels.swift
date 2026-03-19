@@ -31,10 +31,48 @@ enum CodexSecureConnectionState: Equatable, Sendable {
 struct CodexPairingQRPayload: Codable, Sendable {
     let v: Int
     let relay: String
+    let relayCandidates: [String]?
+    let relayAuthKey: String?
     let sessionId: String
     let macDeviceId: String
     let macIdentityPublicKey: String
     let expiresAt: Int64
+}
+
+extension CodexPairingQRPayload {
+    static func parse(from rawValue: String) throws -> CodexPairingQRPayload {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw CodexSecureTransportError.invalidQR("Pairing payload is empty.")
+        }
+
+        let decoder = JSONDecoder()
+
+        if let directData = trimmed.data(using: .utf8),
+           let payload = try? decoder.decode(CodexPairingQRPayload.self, from: directData) {
+            return payload
+        }
+
+        if let base64Data = Data(base64Encoded: trimmed),
+           let payload = try? decoder.decode(CodexPairingQRPayload.self, from: base64Data) {
+            return payload
+        }
+
+        if let url = URL(string: trimmed),
+           let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let encoded = components.queryItems?.first(where: { $0.name == "payload" })?.value?.removingPercentEncoding {
+            if let data = encoded.data(using: .utf8),
+               let payload = try? decoder.decode(CodexPairingQRPayload.self, from: data) {
+                return payload
+            }
+            if let base64Data = Data(base64Encoded: encoded),
+               let payload = try? decoder.decode(CodexPairingQRPayload.self, from: base64Data) {
+                return payload
+            }
+        }
+
+        throw CodexSecureTransportError.invalidQR("Unable to parse pairing payload from QR data.")
+    }
 }
 
 struct CodexPhoneIdentityState: Codable, Sendable {
@@ -56,7 +94,7 @@ struct CodexTrustedMacRegistry: Codable, Sendable {
 }
 
 struct SecureClientHello: Codable, Sendable {
-    let kind = "clientHello"
+    var kind: String = "clientHello"
     let protocolVersion: Int
     let sessionId: String
     let handshakeMode: CodexSecureHandshakeMode
@@ -82,7 +120,7 @@ struct SecureServerHello: Codable, Sendable {
 }
 
 struct SecureClientAuth: Codable, Sendable {
-    let kind = "clientAuth"
+    var kind: String = "clientAuth"
     let sessionId: String
     let phoneDeviceId: String
     let keyEpoch: Int
@@ -97,7 +135,7 @@ struct SecureReadyMessage: Codable, Sendable {
 }
 
 struct SecureResumeState: Codable, Sendable {
-    let kind = "resumeState"
+    var kind: String = "resumeState"
     let sessionId: String
     let keyEpoch: Int
     let lastAppliedBridgeOutboundSeq: Int

@@ -12,19 +12,25 @@ private enum CodexNotificationSource {
     static let runCompletion = "codex.runCompletion"
 }
 
-protocol CodexRemoteNotificationRegistering: AnyObject {
+protocol CodexRemoteNotificationRegistering {
     func registerForRemoteNotifications()
 }
 
-final class CodexApplicationRemoteNotificationRegistrar: CodexRemoteNotificationRegistering {
+struct CodexApplicationRemoteNotificationRegistrar: CodexRemoteNotificationRegistering {
     // Requests the APNs device token once alert permission is no longer denied.
     func registerForRemoteNotifications() {
 #if targetEnvironment(simulator)
         return
 #else
-        UIApplication.shared.registerForRemoteNotifications()
+        DispatchQueue.main.async {
+            UIApplication.shared.registerForRemoteNotifications()
+        }
 #endif
     }
+}
+
+struct CodexNoopRemoteNotificationRegistrar: CodexRemoteNotificationRegistering {
+    func registerForRemoteNotifications() {}
 }
 
 private enum CodexPushAPNsEnvironment: String {
@@ -170,6 +176,7 @@ extension CodexService {
         SecureStore.writeString(token, for: CodexSecureKeys.pushDeviceToken)
 
         Task { @MainActor [weak self] in
+            await self?.refreshNotificationAuthorizationStatus()
             await self?.syncManagedPushRegistrationIfNeeded(force: true)
         }
     }
@@ -361,7 +368,9 @@ private extension CodexService {
                 return
             }
 
-            self?.handleRemoteNotificationDeviceToken(tokenData)
+            Task { @MainActor [weak self] in
+                self?.handleRemoteNotificationDeviceToken(tokenData)
+            }
         }
 
         let didFailObserver = NotificationCenter.default.addObserver(
@@ -373,7 +382,9 @@ private extension CodexService {
                 return
             }
 
-            self?.debugRuntimeLog("remote notification registration failed: \(error.localizedDescription)")
+            Task { @MainActor [weak self] in
+                self?.debugRuntimeLog("remote notification registration failed: \(error.localizedDescription)")
+            }
         }
 
         notificationObserverTokens = [didRegisterObserver, didFailObserver]

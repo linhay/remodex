@@ -8,15 +8,31 @@ import CryptoKit
 import Foundation
 
 struct CodexMessagePersistence {
+    private let accountScope: String?
     // v6 encrypts the on-device message cache while keeping backward-compatible legacy fallbacks.
-    private let fileName = "codex-message-history-v6.bin"
-    private let legacyFileNames = [
+    private var fileName: String {
+        if let accountScope, !accountScope.isEmpty {
+            return "codex-message-history-v6-\(accountScope).bin"
+        }
+        return "codex-message-history-v6.bin"
+    }
+    private var legacyFileNames: [String] {
+        if let accountScope, !accountScope.isEmpty {
+            return []
+        }
+        return [
         "codex-message-history-v5.json",
         "codex-message-history-v4.json",
         "codex-message-history-v3.json",
         "codex-message-history-v2.json",
         "codex-message-history.json",
-    ]
+        ]
+    }
+
+    init(accountScope: String? = nil) {
+        let normalized = accountScope?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.accountScope = normalized.isEmpty ? nil : normalized
+    }
 
     // Loads the saved message map from disk. Returns an empty store on failure.
     func load() -> [String: [CodexMessage]] {

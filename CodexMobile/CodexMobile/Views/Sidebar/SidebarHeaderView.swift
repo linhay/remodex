@@ -6,13 +6,21 @@
 import SwiftUI
 
 struct SidebarHeaderView: View {
+    var onTapLogo: (() -> Void)? = nil
+
     var body: some View {
         HStack(spacing: 10) {
-            Image("AppLogo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 26, height: 26)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            Button {
+                onTapLogo?()
+            } label: {
+                Image("AppLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 26, height: 26)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Back to Accounts")
 
             Text("Remodex")
                 .font(AppFont.title3(weight: .medium))

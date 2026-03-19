@@ -537,6 +537,14 @@ function readBridgeConfig({
     defaultRelayUrl,
     env
   );
+  const relayCandidates = parseDelimitedEnv(
+    readFirstDefinedEnv(["REMODEX_RELAY_CANDIDATES"], "", env)
+  );
+  const relayAuthKey = readFirstDefinedEnv(
+    ["REMODEX_RELAY_KEY", "PHODEX_RELAY_KEY"],
+    "",
+    env
+  );
   const defaultPushServiceUrl = sourceCheckout || explicitRelayUrl
     ? ""
     : privateDefaults.pushServiceUrl;
@@ -555,6 +563,8 @@ function readBridgeConfig({
   const defaultRefreshEnabled = false;
   return {
     relayUrl,
+    relayCandidates,
+    relayAuthKey,
     pushServiceUrl: readFirstDefinedEnv(
       ["REMODEX_PUSH_SERVICE_URL"],
       defaultPushServiceUrl,
@@ -733,6 +743,27 @@ function parseBooleanEnv(value) {
 function parseIntegerEnv(value, fallback) {
   const parsed = Number.parseInt(String(value), 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function parseDelimitedEnv(value) {
+  if (!value || typeof value !== "string") {
+    return [];
+  }
+
+  const seen = new Set();
+  const result = [];
+  value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((item) => {
+      if (seen.has(item)) {
+        return;
+      }
+      seen.add(item);
+      result.push(item);
+    });
+  return result;
 }
 
 function extractErrorMessage(error) {

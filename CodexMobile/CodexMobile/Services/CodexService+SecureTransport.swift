@@ -11,11 +11,26 @@ import Security
 extension CodexService {
     // Completes the secure handshake before any JSON-RPC traffic is sent over the relay.
     func performSecureHandshake() async throws {
-        guard let sessionId = normalizedRelaySessionId,
-              let macDeviceId = normalizedRelayMacDeviceId else {
+        guard let sessionId = normalizedRelaySessionId else {
             throw CodexSecureTransportError.invalidHandshake(
                 "The saved relay pairing is incomplete. Scan a fresh QR code to reconnect."
             )
+        }
+        let macDeviceId = CodexRelayPairingRepairPolicy.inferredMacDeviceId(
+            configuredMacDeviceId: normalizedRelayMacDeviceId,
+            configuredMacIdentityPublicKey: normalizedRelayMacIdentityPublicKey,
+            trustedMacRecords: trustedMacRegistry.records
+        )
+        guard let macDeviceId else {
+            throw CodexSecureTransportError.invalidHandshake(
+                "The saved relay pairing is incomplete. Scan a fresh QR code to reconnect."
+            )
+        }
+        if normalizedRelayMacDeviceId == nil {
+            relayMacDeviceId = macDeviceId
+            updateActiveRelayAccount { profile in
+                profile.relayMacDeviceId = macDeviceId
+            }
         }
 
         let trustedMac = trustedMacRegistry.records[macDeviceId]
@@ -253,14 +268,26 @@ extension CodexService {
 
     // Saves the QR-derived bridge metadata used for secure reconnects.
     func rememberRelayPairing(_ payload: CodexPairingQRPayload) {
+        let normalizedCandidates = (payload.relayCandidates?.isEmpty == false) ? payload.relayCandidates! : [payload.relay]
         SecureStore.writeString(payload.sessionId, for: CodexSecureKeys.relaySessionId)
         SecureStore.writeString(payload.relay, for: CodexSecureKeys.relayUrl)
+        if let encodedCandidates = try? JSONEncoder().encode(normalizedCandidates),
+           let encodedCandidatesText = String(data: encodedCandidates, encoding: .utf8) {
+            SecureStore.writeString(encodedCandidatesText, for: CodexSecureKeys.relayCandidates)
+        }
+        if let relayAuthKey = payload.relayAuthKey {
+            SecureStore.writeString(relayAuthKey, for: CodexSecureKeys.relayAuthKey)
+        } else {
+            SecureStore.deleteValue(for: CodexSecureKeys.relayAuthKey)
+        }
         SecureStore.writeString(payload.macDeviceId, for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.writeString(payload.macIdentityPublicKey, for: CodexSecureKeys.relayMacIdentityPublicKey)
         SecureStore.writeString(String(codexSecureProtocolVersion), for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.writeString("0", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = payload.sessionId
         relayUrl = payload.relay
+        relayCandidates = normalizedCandidates
+        relayAuthKey = payload.relayAuthKey
         relayMacDeviceId = payload.macDeviceId
         relayMacIdentityPublicKey = payload.macIdentityPublicKey
         relayProtocolVersion = codexSecureProtocolVersion
@@ -306,6 +333,39 @@ extension CodexService {
             secureConnectionState = .notPaired
             secureMacFingerprint = nil
         }
+    }
+}
+
+enum CodexRelayPairingRepairPolicy {
+    static func inferredMacDeviceId(
+        configuredMacDeviceId: String?,
+        configuredMacIdentityPublicKey: String?,
+        trustedMacRecords: [String: CodexTrustedMacRecord]
+    ) -> String? {
+        if let configuredMacDeviceId = trimmedNonEmpty(configuredMacDeviceId) {
+            return configuredMacDeviceId
+        }
+
+        if let configuredMacIdentityPublicKey = trimmedNonEmpty(configuredMacIdentityPublicKey),
+           let matched = trustedMacRecords.first(where: {
+               $0.value.macIdentityPublicKey == configuredMacIdentityPublicKey
+           }) {
+            return matched.key
+        }
+
+        if trustedMacRecords.count == 1 {
+            return trustedMacRecords.first?.key
+        }
+
+        return nil
+    }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
     }
 }
 

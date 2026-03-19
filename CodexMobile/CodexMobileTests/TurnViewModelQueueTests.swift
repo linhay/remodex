@@ -12,7 +12,7 @@ final class TurnViewModelQueueTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
     private static var retainedViewModels: [TurnViewModel] = []
 
-    func testSendTurnQueuesImmediatelyWhenThreadBusy() async {
+    func testSendTurnQueuesImmediatelyWhenThreadBusy() async throws {
         let service = makeService()
         service.isConnected = true
         service.runningThreadIDs.insert("thread-queue")
@@ -122,7 +122,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 1)
     }
 
-    func testQueuedDraftsPersistAcrossViewModelRecreationForSameThread() {
+    func testQueuedDraftsPersistAcrossViewModelRecreationForSameThread() async {
         let service = makeService()
         service.isConnected = true
         service.runningThreadIDs.insert("thread-queue")
@@ -130,6 +130,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         let firstViewModel = makeViewModel()
         firstViewModel.input = "Message one"
         firstViewModel.sendTurn(codex: service, threadID: "thread-queue")
+        await waitForSendCompletion(firstViewModel)
 
         let secondViewModel = makeViewModel()
         XCTAssertEqual(secondViewModel.queuedCount(codex: service, threadID: "thread-queue"), 1)
@@ -139,6 +140,7 @@ final class TurnViewModelQueueTests: XCTestCase {
     func testSendTurnStartsImmediatelyWhenRunningFlagRefreshClearsStaleBusyState() async {
         let service = makeService()
         service.isConnected = true
+        service.isInitialized = true
         service.runningThreadIDs.insert("thread-queue")
         service.resumedThreadIDs.insert("thread-queue")
 
@@ -179,6 +181,7 @@ final class TurnViewModelQueueTests: XCTestCase {
     func testSendTurnQueuesAfterBusyRefreshConfirmsActiveRun() async {
         let service = makeService()
         service.isConnected = true
+        service.isInitialized = true
         service.runningThreadIDs.insert("thread-queue")
 
         var recordedMethods: [String] = []
@@ -220,6 +223,8 @@ final class TurnViewModelQueueTests: XCTestCase {
     func testFlushQueuePreservesPlanModeFromBusyThreadQueue() async {
         let service = makeService()
         service.isConnected = true
+        service.supportsTurnCollaborationMode = true
+        service.selectedModelId = "gpt-5.3-codex"
         service.runningThreadIDs.insert("thread-queue")
 
         let viewModel = makeViewModel()
@@ -237,6 +242,7 @@ final class TurnViewModelQueueTests: XCTestCase {
 
         service.runningThreadIDs.remove("thread-queue")
         service.activeTurnIdByThread["thread-queue"] = nil
+        service.resumedThreadIDs.insert("thread-queue")
 
         var capturedParams: JSONValue?
         service.requestTransportOverride = { method, params in
@@ -253,7 +259,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         await waitForSendCompletion(viewModel)
 
         XCTAssertEqual(
-            capturedParams?.objectValue?["collaborationMode"]?.stringValue,
+            capturedParams?.objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue,
             CodexCollaborationModeKind.plan.rawValue
         )
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 0)
@@ -366,7 +372,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertEqual(inputItems[2].objectValue?["id"]?.stringValue, "check-code")
     }
 
-    func testSteerQueuedDraftPreservesPlanMode() async {
+    func testSteerQueuedDraftDoesNotSendPlanModeForSteer() async {
         let service = makeService()
         service.isConnected = true
         service.runningThreadIDs.insert("thread-queue")
@@ -399,10 +405,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         viewModel.steerQueuedDraft(id: draft.id, codex: service, threadID: "thread-queue")
         await waitForSteerCompletion(viewModel)
 
-        XCTAssertEqual(
-            capturedParams?.objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue,
-            CodexCollaborationModeKind.plan.rawValue
-        )
+        XCTAssertNil(capturedParams?.objectValue?["collaborationMode"])
     }
 
     func testSteerQueuedDraftFailureKeepsRowAndDoesNotPauseQueue() async {
@@ -465,12 +468,13 @@ final class TurnViewModelQueueTests: XCTestCase {
 
         XCTAssertEqual(recordedMethods, ["thread/read", "turn/steer"])
         XCTAssertEqual(expectedTurnIDs, ["turn-fallback"])
-        XCTAssertTrue(service.queuedTurnDraftsByThread["thread-queue"]?.isEmpty ?? false)
+        XCTAssertTrue(service.queuedTurnDraftsByThread["thread-queue"]?.isEmpty ?? true)
     }
 
     func testSteerQueuedDraftStartsTurnWhenRunningFlagRefreshClearsStaleBusyState() async {
         let service = makeService()
         service.isConnected = true
+        service.isInitialized = true
         service.runningThreadIDs.insert("thread-queue")
         service.resumedThreadIDs.insert("thread-queue")
 
@@ -505,7 +509,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         await waitForSteerCompletion(viewModel)
 
         XCTAssertEqual(recordedMethods, ["thread/read", "turn/start"])
-        XCTAssertTrue(service.queuedTurnDraftsByThread["thread-queue"]?.isEmpty ?? false)
+        XCTAssertTrue(service.queuedTurnDraftsByThread["thread-queue"]?.isEmpty ?? true)
         XCTAssertEqual(service.activeTurnID(for: "thread-queue"), "turn-new")
     }
 

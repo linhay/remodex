@@ -10,10 +10,14 @@ import SwiftUI
 struct CodexMobileApp: App {
     @UIApplicationDelegateAdaptor(CodexMobileAppDelegate.self) private var appDelegate
     @State private var codexService: CodexService
+    private let isRunningXCTest: Bool
 
     init() {
+        isRunningXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         let service = CodexService()
-        service.configureNotifications()
+        if !isRunningXCTest {
+            service.configureNotifications()
+        }
         _codexService = State(initialValue: service)
     }
 
@@ -22,6 +26,9 @@ struct CodexMobileApp: App {
             ContentView()
                 .environment(codexService)
                 .task {
+                    guard !isRunningXCTest else {
+                        return
+                    }
                     await codexService.requestNotificationPermissionOnFirstLaunchIfNeeded()
                 }
         }

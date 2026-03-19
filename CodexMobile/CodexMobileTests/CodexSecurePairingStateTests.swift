@@ -10,6 +10,124 @@ import XCTest
 
 @MainActor
 final class CodexSecurePairingStateTests: XCTestCase {
+    func testRelayAccountSanitizerDropsUITestProfilesOutsideXCTest() {
+        let uiProfile = CodexRelayAccountProfile(
+            id: "ui-profile",
+            displayName: "UI",
+            createdAt: Date(),
+            lastUsedAt: Date(),
+            lastConnectedAt: nil,
+            lastErrorMessage: nil,
+            relaySessionId: "uitest-session-lan",
+            relayURL: "ws://127.0.0.1:8788/relay",
+            relayCandidates: ["ws://127.0.0.1:8788/relay"],
+            relayAuthKey: nil,
+            relayMacDeviceId: "uitest-mac-lan",
+            relayMacIdentityPublicKey: Data(repeating: 1, count: 32).base64EncodedString(),
+            relayProtocolVersion: codexSecureProtocolVersion,
+            lastAppliedBridgeOutboundSeq: 0
+        )
+        let realProfile = CodexRelayAccountProfile(
+            id: "real-profile",
+            displayName: "Real",
+            createdAt: Date(),
+            lastUsedAt: Date(),
+            lastConnectedAt: nil,
+            lastErrorMessage: nil,
+            relaySessionId: "real-session",
+            relayURL: "wss://relay.section.trade/relay",
+            relayCandidates: ["wss://relay.section.trade/relay"],
+            relayAuthKey: nil,
+            relayMacDeviceId: "mac-6",
+            relayMacIdentityPublicKey: Data(repeating: 2, count: 32).base64EncodedString(),
+            relayProtocolVersion: codexSecureProtocolVersion,
+            lastAppliedBridgeOutboundSeq: 0
+        )
+
+        let sanitized = CodexRelayAccountSanitizer.sanitizedProfiles(
+            [uiProfile, realProfile],
+            isRunningXCTest: false
+        )
+        XCTAssertEqual(sanitized.map(\.id), ["real-profile"])
+    }
+
+    func testRelayAccountSanitizerKeepsUITestProfilesDuringXCTest() {
+        let uiProfile = CodexRelayAccountProfile(
+            id: "ui-profile",
+            displayName: "UI",
+            createdAt: Date(),
+            lastUsedAt: Date(),
+            lastConnectedAt: nil,
+            lastErrorMessage: nil,
+            relaySessionId: "uitest-session-lan",
+            relayURL: "ws://127.0.0.1:8788/relay",
+            relayCandidates: ["ws://127.0.0.1:8788/relay"],
+            relayAuthKey: nil,
+            relayMacDeviceId: "uitest-mac-lan",
+            relayMacIdentityPublicKey: Data(repeating: 1, count: 32).base64EncodedString(),
+            relayProtocolVersion: codexSecureProtocolVersion,
+            lastAppliedBridgeOutboundSeq: 0
+        )
+
+        let sanitized = CodexRelayAccountSanitizer.sanitizedProfiles(
+            [uiProfile],
+            isRunningXCTest: true
+        )
+        XCTAssertEqual(sanitized.map(\.id), ["ui-profile"])
+    }
+
+    func testPairingRepairPolicyKeepsConfiguredMacDeviceId() {
+        let inferred = CodexRelayPairingRepairPolicy.inferredMacDeviceId(
+            configuredMacDeviceId: "mac-configured",
+            configuredMacIdentityPublicKey: nil,
+            trustedMacRecords: [:]
+        )
+
+        XCTAssertEqual(inferred, "mac-configured")
+    }
+
+    func testPairingRepairPolicyInfersMacDeviceIdByPublicKey() {
+        let targetPublicKey = Data(repeating: 9, count: 32).base64EncodedString()
+        let records: [String: CodexTrustedMacRecord] = [
+            "mac-a": CodexTrustedMacRecord(
+                macDeviceId: "mac-a",
+                macIdentityPublicKey: Data(repeating: 1, count: 32).base64EncodedString(),
+                lastPairedAt: Date()
+            ),
+            "mac-b": CodexTrustedMacRecord(
+                macDeviceId: "mac-b",
+                macIdentityPublicKey: targetPublicKey,
+                lastPairedAt: Date()
+            ),
+        ]
+
+        let inferred = CodexRelayPairingRepairPolicy.inferredMacDeviceId(
+            configuredMacDeviceId: nil,
+            configuredMacIdentityPublicKey: targetPublicKey,
+            trustedMacRecords: records
+        )
+
+        XCTAssertEqual(inferred, "mac-b")
+    }
+
+    func testPairingRepairPolicyFallsBackToOnlyTrustedMac() {
+        let records: [String: CodexTrustedMacRecord] = [
+            "mac-only": CodexTrustedMacRecord(
+                macDeviceId: "mac-only",
+                macIdentityPublicKey: Data(repeating: 3, count: 32).base64EncodedString(),
+                lastPairedAt: Date()
+            )
+        ]
+
+        let inferred = CodexRelayPairingRepairPolicy.inferredMacDeviceId(
+            configuredMacDeviceId: nil,
+            configuredMacIdentityPublicKey: nil,
+            trustedMacRecords: records
+        )
+
+        XCTAssertEqual(inferred, "mac-only")
+    }
+
     func testRememberRelayPairingForcesFreshQRBootstrapEvenForTrustedMac() {
         let service = CodexService()
         let macDeviceID = "mac-\(UUID().uuidString)"

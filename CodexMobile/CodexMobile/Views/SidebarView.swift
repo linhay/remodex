@@ -14,6 +14,7 @@ struct SidebarView: View {
     @Binding var showSettings: Bool
     @Binding var isSearchActive: Bool
 
+    let onNavigateToAccountsHome: () -> Void
     let onClose: () -> Void
 
     @State private var searchText = ""
@@ -32,7 +33,7 @@ struct SidebarView: View {
         let diffTotalsByThreadID = cachedDiffTotals
 
         VStack(alignment: .leading, spacing: 0) {
-            SidebarHeaderView()
+            SidebarHeaderView(onTapLogo: navigateToAccountsHome)
 
             SidebarSearchField(text: $searchText, isActive: $isSearchActive)
                 .padding(.horizontal, 16)
@@ -250,6 +251,14 @@ struct SidebarView: View {
     private func openSettings() {
         searchText = ""
         showSettings = true
+        onClose()
+    }
+
+    private func navigateToAccountsHome() {
+        searchText = ""
+        selectedThread = nil
+        codex.activeThreadId = nil
+        onNavigateToAccountsHome()
         onClose()
     }
 

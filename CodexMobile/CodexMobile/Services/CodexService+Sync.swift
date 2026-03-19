@@ -17,15 +17,12 @@ extension CodexService {
         stopSyncLoop()
         debugSyncLog("sync loop start")
 
-        // Foreground polling is intentionally more aggressive so desktop-authored changes
-        // feel closer to live on iPhone even when Codex.app itself doesn't push updates.
-        let listIntervalForegroundNs: UInt64 = 10_000_000_000
+        let listIntervalForegroundNs: UInt64 = 20_000_000_000
         let listIntervalBackgroundNs: UInt64 = 75_000_000_000
-        let historyIntervalForegroundNs: UInt64 = 3_000_000_000
-        let historyIntervalForegroundMirroredNs: UInt64 = 1_000_000_000
+        let historyIntervalForegroundNs: UInt64 = 15_000_000_000
         let historyIntervalBackgroundIdleNs: UInt64 = 90_000_000_000
         let historyIntervalBackgroundRunningNs: UInt64 = 12_000_000_000
-        let watchIntervalForegroundNs: UInt64 = 2_000_000_000
+        let watchIntervalForegroundNs: UInt64 = 4_000_000_000
         let watchIntervalBackgroundNs: UInt64 = 15_000_000_000
 
         threadListSyncTask = Task { [weak self] in
@@ -41,13 +38,10 @@ extension CodexService {
             while let self, !Task.isCancelled {
                 if let threadId = self.activeThreadId {
                     let hasActiveOrRunningTurn = self.threadHasActiveOrRunningTurn(threadId)
-                    let wantsMirroredRunningCatchup = self.shouldPrioritizeMirroredRunningCatchup(threadId)
                     await self.syncActiveThreadState(threadId: threadId)
                     let interval: UInt64
                     if self.isAppInForeground {
-                        interval = wantsMirroredRunningCatchup
-                            ? historyIntervalForegroundMirroredNs
-                            : historyIntervalForegroundNs
+                        interval = historyIntervalForegroundNs
                     } else if hasActiveOrRunningTurn {
                         interval = historyIntervalBackgroundRunningNs
                     } else {
@@ -128,12 +122,12 @@ extension CodexService {
         }
 
         do {
-            let activeThreads = try await fetchServerThreads(limit: recentThreadListLimit)
+            let activeThreads = try await fetchServerThreads()
 
             // Also fetch server-archived threads so they survive app restarts.
             var archivedThreads: [CodexThread] = []
             do {
-                archivedThreads = try await fetchServerThreads(limit: recentThreadListLimit, archived: true)
+                archivedThreads = try await fetchServerThreads(archived: true)
             } catch {
                 debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
             }
@@ -150,7 +144,7 @@ extension CodexService {
             return
         }
 
-        if thread(for: threadId)?.syncState == .archivedLocal {
+        if threads.first(where: { $0.id == threadId })?.syncState == .archivedLocal {
             return
         }
 
@@ -175,8 +169,6 @@ extension CodexService {
         let localByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         let persistedArchivedIDs = locallyArchivedThreadIDs
         let persistedDeletedIDs = locallyDeletedThreadIDs
-        let serverArchivedIDs = Set(serverArchivedThreads.map(\.id))
-
         var merged: [String: CodexThread] = [:]
 
         // Merge active server threads.
@@ -188,7 +180,14 @@ extension CodexService {
             var liveThread = serverThread
 
             if let localThread = localByID[liveThread.id] {
-                liveThread.syncState = localThread.syncState
+                // Keep user-archived threads archived, but allow server-visible threads to recover
+                // from transient local "missing thread" placeholders.
+                if localThread.syncState == .archivedLocal,
+                   !persistedArchivedIDs.contains(liveThread.id) {
+                    liveThread.syncState = .live
+                } else {
+                    liveThread.syncState = localThread.syncState
+                }
                 if liveThread.title == nil { liveThread.title = localThread.title }
                 if liveThread.name == nil { liveThread.name = localThread.name }
                 if liveThread.preview == nil { liveThread.preview = localThread.preview }
@@ -251,16 +250,13 @@ extension CodexService {
         threads = sortThreads(Array(merged.values))
         assistantRevertStateCacheByThread.removeAll()
         refreshBusyRepoRootsAndDependentTimelineStates()
-        // Full reconciliation — always refresh all threads even if busy-roots already hit some.
         refreshAllThreadTimelineStates()
-
-        if activeThreadId == nil {
-            activeThreadId = firstLiveThreadID()
-        }
+        activeThreadId = CodexActiveThreadSelectionPolicy.retainedActiveThreadID(
+            currentActiveThreadID: activeThreadId,
+            availableThreadIDs: threads.map(\.id)
+        )
 
         if pendingNotificationOpenThreadID != nil {
-            // A successful thread/list refresh gives us fresh server truth, so retry
-            // any deferred push deep-link without forcing another list round-trip.
             Task { @MainActor [weak self] in
                 _ = await self?.routePendingNotificationOpenIfPossible(refreshIfNeeded: false)
             }
@@ -271,7 +267,7 @@ extension CodexService {
         clearRunningState(for: threadId)
         clearOutcomeBadge(for: threadId)
 
-        if let index = threadIndex(for: threadId) {
+        if let index = threads.firstIndex(where: { $0.id == threadId }) {
             threads[index].syncState = .archivedLocal
         } else {
             threads.append(CodexThread(id: threadId, title: "Conversation", syncState: .archivedLocal))
@@ -317,7 +313,7 @@ extension CodexService {
         removeThreadTimelineState(for: threadId)
         clearOutcomeBadge(for: threadId)
 
-        if let index = threadIndex(for: threadId) {
+        if let index = threads.firstIndex(where: { $0.id == threadId }) {
             threads[index].syncState = .archivedLocal
         }
 
@@ -348,7 +344,7 @@ extension CodexService {
     }
 
     func unarchiveThread(_ threadId: String) {
-        if let index = threadIndex(for: threadId) {
+        if let index = threads.firstIndex(where: { $0.id == threadId }) {
             threads[index].syncState = .live
         }
         removeLocallyArchivedThreadID(threadId)
@@ -365,7 +361,7 @@ extension CodexService {
 
     func renameThread(_ threadId: String, name: String) {
         // Optimistic local update.
-        if let index = threadIndex(for: threadId) {
+        if let index = threads.firstIndex(where: { $0.id == threadId }) {
             threads[index].name = name
             threads[index].title = name
         }
@@ -374,7 +370,7 @@ extension CodexService {
     }
 
     private func sendThreadNameSetRPC(threadId: String, name: String) {
-        guard isConnected, webSocketConnection != nil || webSocketTask != nil else { return }
+        guard isConnected, webSocketConnection != nil else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -407,10 +403,6 @@ extension CodexService {
         clearRunningState(for: threadId)
         removeThreadTimelineState(for: threadId)
         clearOutcomeBadge(for: threadId)
-
-        // Drop local-only runtime overrides once a chat is fully removed from the device.
-        clearThreadReasoningEffortOverride(for: threadId)
-        clearThreadServiceTierOverride(for: threadId)
 
         threads.removeAll { $0.id == threadId }
         messagesByThread.removeValue(forKey: threadId)
@@ -492,59 +484,18 @@ extension CodexService {
         syncRealtimeEnabled && isConnected && isInitialized
     }
 
-    // Prioritizes only desktop-mirrored runs that still lack authoritative assistant deltas.
-    func shouldPrioritizeMirroredRunningCatchup(_ threadId: String) -> Bool {
-        mirroredRunningCatchupThreadIDs.contains(threadId) && threadHasActiveOrRunningTurn(threadId)
-    }
-
-    // Grants one bounded catch-up slot so mirrored desktop runs can refresh via
-    // thread/resume without hammering the server every loop tick.
-    func takeMirroredRunningCatchupPermit(
-        for threadId: String,
-        minInterval: TimeInterval = 1.0,
-        now: Date = Date()
-    ) -> Bool {
-        guard shouldPrioritizeMirroredRunningCatchup(threadId) else {
-            return false
-        }
-
-        if let lastSyncAt = lastMirroredRunningCatchupAtByThread[threadId],
-           now.timeIntervalSince(lastSyncAt) < minInterval {
-            return false
-        }
-
-        lastMirroredRunningCatchupAtByThread[threadId] = now
-        return true
-    }
-
     // Polls the currently displayed thread even while it is running so missed socket events can recover.
     // If the live snapshot fails, fall back to a history refresh instead of trusting stale running state.
     func syncActiveThreadState(threadId: String) async {
         let wasRunning = threadHasActiveOrRunningTurn(threadId)
-        let shouldRunMirroredCatchup = wasRunning && takeMirroredRunningCatchupPermit(for: threadId)
-        var didRunMirroredCatchup = false
-
         if wasRunning {
             let didRefresh = await refreshInFlightTurnState(threadId: threadId)
-            let isStillRunning = threadHasActiveOrRunningTurn(threadId)
-
-            if shouldRunMirroredCatchup && isStillRunning {
-                do {
-                    _ = try await ensureThreadResumed(threadId: threadId, force: true)
-                } catch {
-                    await syncThreadHistory(threadId: threadId, force: true)
-                }
-                didRunMirroredCatchup = true
-            }
-
-            guard !didRefresh || !isStillRunning else {
+            guard !didRefresh || !threadHasActiveOrRunningTurn(threadId) else {
                 return
             }
         }
 
-        if !didRunMirroredCatchup {
-            await syncThreadHistory(threadId: threadId, force: true)
-        }
+        await syncThreadHistory(threadId: threadId, force: true)
     }
 
     func refreshInactiveRunningBadgeThreads(limit: Int = 3) async {
@@ -630,7 +581,7 @@ extension CodexService {
     /// Best-effort server-side archive/unarchive. Failures are logged but never
     /// surface to the user or trigger reconnection side-effects.
     private func sendThreadArchiveRPC(threadId: String, unarchive: Bool) {
-        guard isConnected, webSocketConnection != nil || webSocketTask != nil else { return }
+        guard isConnected, webSocketConnection != nil else { return }
         let method = unarchive ? "thread/unarchive" : "thread/archive"
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -648,28 +599,28 @@ extension CodexService {
     private static let locallyDeletedThreadIDsKey = "codex.locallyDeletedThreadIDs"
 
     var locallyArchivedThreadIDs: Set<String> {
-        Set(defaults.stringArray(forKey: Self.locallyArchivedThreadIDsKey) ?? [])
+        Set(defaults.stringArray(forKey: accountScopedDefaultsKey(Self.locallyArchivedThreadIDsKey)) ?? [])
     }
 
     var locallyDeletedThreadIDs: Set<String> {
-        Set(defaults.stringArray(forKey: Self.locallyDeletedThreadIDsKey) ?? [])
+        Set(defaults.stringArray(forKey: accountScopedDefaultsKey(Self.locallyDeletedThreadIDsKey)) ?? [])
     }
 
     private func addLocallyArchivedThreadID(_ threadId: String) {
         var ids = locallyArchivedThreadIDs
         ids.insert(threadId)
-        defaults.set(Array(ids), forKey: Self.locallyArchivedThreadIDsKey)
+        defaults.set(Array(ids), forKey: accountScopedDefaultsKey(Self.locallyArchivedThreadIDsKey))
     }
 
     private func removeLocallyArchivedThreadID(_ threadId: String) {
         var ids = locallyArchivedThreadIDs
         ids.remove(threadId)
-        defaults.set(Array(ids), forKey: Self.locallyArchivedThreadIDsKey)
+        defaults.set(Array(ids), forKey: accountScopedDefaultsKey(Self.locallyArchivedThreadIDsKey))
     }
 
     private func addLocallyDeletedThreadID(_ threadId: String) {
         var ids = locallyDeletedThreadIDs
         ids.insert(threadId)
-        defaults.set(Array(ids), forKey: Self.locallyDeletedThreadIDsKey)
+        defaults.set(Array(ids), forKey: accountScopedDefaultsKey(Self.locallyDeletedThreadIDsKey))
     }
 }

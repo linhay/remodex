@@ -10,9 +10,21 @@ import Network
 import Security
 
 // Keeps encrypted relay envelopes under one explicit ceiling across all iPhone websocket APIs.
-private let codexWebSocketMaximumMessageSizeBytes = 4 * 1024 * 1024
+// Image-heavy thread history and secure-envelope overhead can legitimately exceed 4 MB while
+// reopening a chat, so the limit needs enough headroom for background `thread/read` catches too.
+let codexWebSocketMaximumMessageSizeBytes = 16 * 1024 * 1024
 
 extension CodexService {
+    // Rejects oversized relay frames before Network.framework turns them into a raw EMSGSIZE failure.
+    func validateOutgoingWebSocketMessageSize(_ text: String) throws {
+        let payloadSize = Data(text.utf8).count
+        guard payloadSize <= codexWebSocketMaximumMessageSizeBytes else {
+            throw CodexServiceError.invalidInput(
+                "This payload is too large for the relay connection. Try fewer or smaller images and retry."
+            )
+        }
+    }
+
     // Sends an RPC request and waits for the matching response by request id.
     func sendRequest(method: String, params: JSONValue?) async throws -> RPCMessage {
         if let requestTransportOverride {
@@ -94,6 +106,8 @@ extension CodexService {
 
     // Sends raw secure control messages before the JSON-RPC channel is initialized.
     func sendRawText(_ text: String) async throws {
+        try validateOutgoingWebSocketMessageSize(text)
+
         if usesManualWebSocketTransport {
             guard let connection = webSocketConnection else {
                 throw CodexServiceError.disconnected
@@ -233,6 +247,8 @@ extension CodexService {
                     preDecoded = WireMessagePreDecoder.classify(text)
                 }
             }
+            let capturedWireText = wireText
+            let capturedPreDecoded = preDecoded
 
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -245,7 +261,7 @@ extension CodexService {
                         relayCloseCode: self.relayCloseCode(for: task.closeCode)
                     )
                 case .success:
-                    if let text = wireText, let decoded = preDecoded {
+                    if let text = capturedWireText, let decoded = capturedPreDecoded {
                         if decoded.isSecure {
                             self.processIncomingWireText(text)
                         } else if let rpcResult = decoded.rpcResult {
@@ -374,7 +390,7 @@ extension CodexService {
             var didFinish = false
             var timeoutTask: Task<Void, Never>?
 
-            func finish(_ result: Result<Void, Error>) {
+            @Sendable func finish(_ result: Result<Void, Error>) {
                 lock.lock()
                 defer { lock.unlock() }
                 guard !didFinish else { return }
@@ -386,12 +402,16 @@ extension CodexService {
             }
 
             connection.stateUpdateHandler = { state in
-                print("[PAIRING] NWConnection state: \(state)")
+                if !shouldSuppressPairingStateLogForTransport(state) {
+                    print("[PAIRING] NWConnection state: \(state)")
+                }
                 switch state {
                 case .ready:
                     finish(.success(()))
                 case .failed(let error):
-                    print("[PAIRING] NWConnection failed: \(error)")
+                    if !isBenignBackgroundDisconnectForTransport(error) {
+                        print("[PAIRING] NWConnection failed: \(error)")
+                    }
                     finish(.failure(error))
                 case .cancelled:
                     finish(.failure(CodexServiceError.disconnected))
@@ -429,6 +449,11 @@ extension CodexService {
         }
 
         return .network(connection)
+    }
+
+    // Keeps benign NWConnection waiting/failed transitions out of pairing logs to reduce reconnect noise.
+    func shouldSuppressPairingStateLog(_ state: NWConnection.State) -> Bool {
+        shouldSuppressPairingStateLogForTransport(state)
     }
 
     // Uses URLSession for LAN relay sockets because NWConnection has been unreliable
@@ -553,7 +578,7 @@ extension CodexService {
             var didFinish = false
             var timeoutTask: Task<Void, Never>?
 
-            func finish(_ result: Result<Void, Error>) {
+            @Sendable func finish(_ result: Result<Void, Error>) {
                 lock.lock()
                 defer { lock.unlock() }
                 guard !didFinish else { return }
@@ -803,4 +828,36 @@ extension CodexService {
             }
         }
     }
+}
+
+nonisolated private func shouldSuppressPairingStateLogForTransport(_ state: NWConnection.State) -> Bool {
+    switch state {
+    case .waiting(let error), .failed(let error):
+        return isBenignBackgroundDisconnectForTransport(error)
+    default:
+        return false
+    }
+}
+
+nonisolated private func isBenignBackgroundDisconnectForTransport(_ error: Error) -> Bool {
+    if let serviceError = error as? CodexServiceError {
+        if case .disconnected = serviceError {
+            return true
+        }
+    }
+
+    guard let nwError = error as? NWError else {
+        return false
+    }
+
+    if case .posix(let code) = nwError,
+       code == .ECONNABORTED
+        || code == .ECANCELED
+        || code == .ENOTCONN
+        || code == .ENODATA
+        || code == .ECONNRESET {
+        return true
+    }
+
+    return false
 }

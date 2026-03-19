@@ -104,12 +104,12 @@ private extension CodexService {
 
         if let nestedBuckets = payloadObject["rateLimits"]?.objectValue
             ?? payloadObject["rate_limits"]?.objectValue {
-            if containsDirectRateLimitWindows(nestedBuckets) {
-                return decodeDirectRateLimitBuckets(from: nestedBuckets)
-            }
-
             if let decodedBucket = decodeRateLimitBucket(limitId: nil, value: .object(nestedBuckets)) {
                 return [decodedBucket]
+            }
+
+            if containsDirectRateLimitWindows(nestedBuckets) {
+                return decodeDirectRateLimitBuckets(from: nestedBuckets)
             }
         }
 
@@ -127,10 +127,12 @@ private extension CodexService {
     func decodeRateLimitBucket(limitId explicitLimitId: String?, value: JSONValue) -> CodexRateLimitBucket? {
         guard let object = value.objectValue else { return nil }
 
-        let limitId = firstNonEmptyString([
+        guard let limitId = firstNonEmptyString([
             explicitLimitId,
             firstStringValue(in: object, keys: ["limitId", "limit_id", "id"]),
-        ]) ?? UUID().uuidString
+        ]) else {
+            return nil
+        }
 
         let primary = decodeRateLimitWindow(value: object["primary"] ?? object["primary_window"])
         let secondary = decodeRateLimitWindow(value: object["secondary"] ?? object["secondary_window"])
@@ -226,8 +228,8 @@ private extension CodexService {
                 mergedById[bucket.limitId] = CodexRateLimitBucket(
                     limitId: bucket.limitId,
                     limitName: bucket.limitName ?? current.limitName,
-                    primary: bucket.primary ?? current.primary,
-                    secondary: bucket.secondary ?? current.secondary
+                    primary: mergeRateLimitWindows(existing: current.primary, incoming: bucket.primary),
+                    secondary: mergeRateLimitWindows(existing: current.secondary, incoming: bucket.secondary)
                 )
             } else {
                 mergedById[bucket.limitId] = bucket
@@ -235,6 +237,24 @@ private extension CodexService {
         }
 
         return Array(mergedById.values)
+    }
+
+    func mergeRateLimitWindows(
+        existing: CodexRateLimitWindow?,
+        incoming: CodexRateLimitWindow?
+    ) -> CodexRateLimitWindow? {
+        guard let incoming else {
+            return existing
+        }
+        guard let existing else {
+            return incoming
+        }
+
+        return CodexRateLimitWindow(
+            usedPercent: incoming.usedPercent,
+            windowDurationMins: incoming.windowDurationMins ?? existing.windowDurationMins,
+            resetsAt: incoming.resetsAt ?? existing.resetsAt
+        )
     }
 
     func shouldRetryRateLimitsWithEmptyParams(_ error: Error) -> Bool {

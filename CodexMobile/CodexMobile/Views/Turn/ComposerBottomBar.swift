@@ -112,6 +112,8 @@ struct ComposerBottomBar: View {
                 }
             }
             .disabled(isSendDisabled)
+            .accessibilityLabel("Send message")
+            .accessibilityIdentifier("turn.composer.send")
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 10)

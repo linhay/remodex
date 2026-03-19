@@ -305,7 +305,7 @@ extension CodexService {
         if let threadId = activeThreadId
             ?? resolvedPreferredThreadId
             ?? firstLiveThreadID() {
-            await refreshInFlightTurnState(threadId: threadId)
+            _ = await refreshInFlightTurnState(threadId: threadId)
             if threadHasActiveOrRunningTurn(threadId) {
                 _ = try? await ensureThreadResumed(threadId: threadId, force: true)
                 if activeThreadId == threadId {

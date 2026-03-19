@@ -8,6 +8,7 @@ import SwiftUI
 
 struct OnboardingView: View {
     let onContinue: () -> Void
+    private let settingsAccentColor = Color(.plan)
 
     var body: some View {
         ZStack {
@@ -97,7 +98,7 @@ struct OnboardingView: View {
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 15)
                                 .foregroundStyle(.white)
-                                .background(.black, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                .background(settingsAccentColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                             }
                             .buttonStyle(.plain)
                             .padding(.top, 4)

@@ -374,6 +374,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         userNotificationCenter: CodexUserNotificationCentering,
         remoteNotificationRegistrar: CodexRemoteNotificationRegistering
     ) -> CodexService {
+        clearStoredRelayPairing()
         let suiteName = "CodexPushNotificationRegistrationTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
         defaults.removePersistentDomain(forName: suiteName)
@@ -387,6 +388,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
     }
 
     private func clearStoredRelayPairing() {
+        SecureStore.deleteValue(for: CodexSecureKeys.relayAccounts)
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)

@@ -678,7 +678,7 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         XCTAssertEqual(
             normalized,
-            "W -->|Yes| X[Relay replaces old Mac socket<br/>4001 to old connection]"
+            #"W -->|Yes| X["Relay replaces old Mac socket<br/>4001 to old connection"]"#
         )
     }
 
@@ -689,7 +689,10 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         let normalized = MermaidSourceNormalizer.normalized(source)
 
-        XCTAssertEqual(normalized, source)
+        XCTAssertEqual(
+            normalized,
+            #"W -->|Yes| X["Relay replaces old Mac socket<br/>4001 to old connection"]"#
+        )
     }
 
     func testMermaidSourceNormalizerQuotesSquareNodeLabels() {

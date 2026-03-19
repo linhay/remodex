@@ -333,7 +333,7 @@ extension CodexService {
             }
         }
 
-        var finalAttemptParams = baseParams
+        let finalAttemptParams = baseParams
         debugRuntimeLog("\(method) fallback using minimal payload")
         return try await sendRequestWithApprovalPolicyFallback(
             method: method,
@@ -473,12 +473,13 @@ private extension CodexService {
     }
 
     func persistThreadRuntimeOverrides() {
+        let scopedKey = accountScopedDefaultsKey(Self.threadRuntimeOverridesDefaultsKey)
         guard !threadRuntimeOverridesByThreadID.isEmpty,
               let encodedOverrides = try? encoder.encode(threadRuntimeOverridesByThreadID) else {
-            defaults.removeObject(forKey: Self.threadRuntimeOverridesDefaultsKey)
+            defaults.removeObject(forKey: scopedKey)
             return
         }
 
-        defaults.set(encodedOverrides, forKey: Self.threadRuntimeOverridesDefaultsKey)
+        defaults.set(encodedOverrides, forKey: scopedKey)
     }
 }

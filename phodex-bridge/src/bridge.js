@@ -22,6 +22,10 @@ const { createNotificationsHandler } = require("./notifications-handler");
 const { createPushNotificationServiceClient } = require("./push-notification-service-client");
 const { createPushNotificationTracker } = require("./push-notification-tracker");
 const {
+  buildRelayCandidateList,
+  createRelayCandidateRotator,
+} = require("./relay-candidates");
+const {
   loadOrCreateBridgeDeviceState,
   resolveBridgeRelaySession,
 } = require("./secure-device-state");
@@ -30,12 +34,13 @@ const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
 
 function startBridge() {
   const config = readBridgeConfig();
-  const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
-  if (!relayBaseUrl) {
+  const relayCandidates = buildRelayCandidateList(config.relayUrl, config.relayCandidates);
+  if (!relayCandidates.length) {
     console.error("[remodex] No relay URL configured.");
     console.error("[remodex] In a source checkout, run ./run-local-remodex.sh or set REMODEX_RELAY.");
     process.exit(1);
   }
+  const relayBaseUrl = relayCandidates[0];
 
   let deviceState;
   try {
@@ -47,7 +52,11 @@ function startBridge() {
   const relaySession = resolveBridgeRelaySession(deviceState);
   deviceState = relaySession.deviceState;
   const sessionId = relaySession.sessionId;
-  const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
+  const relayRotator = createRelayCandidateRotator(relayCandidates, sessionId);
+  const unpairedRelayProbeMs = parseIntegerEnv(
+    process.env.REMODEX_RELAY_UNPAIRED_PROBE_MS,
+    8_000
+  );
   const notificationSecret = randomBytes(24).toString("hex");
   const desktopRefresher = new CodexDesktopRefresher({
     enabled: config.refreshEnabled,
@@ -75,12 +84,15 @@ function startBridge() {
   let isShuttingDown = false;
   let reconnectAttempt = 0;
   let reconnectTimer = null;
+  let unpairedRelayProbeTimer = null;
   let lastConnectionStatus = null;
   let codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
   const forwardedInitializeRequestIds = new Set();
   const secureTransport = createBridgeSecureTransport({
     sessionId,
-    relayUrl: relayBaseUrl,
+    relayUrl: relayCandidates[0],
+    relayCandidates,
+    relayAuthKey: config.relayAuthKey,
     deviceState,
   });
   // Keeps one stable sender identity across reconnects so buffered replay state
@@ -130,6 +142,14 @@ function startBridge() {
     reconnectTimer = null;
   }
 
+  function clearUnpairedRelayProbeTimer() {
+    if (!unpairedRelayProbeTimer) {
+      return;
+    }
+    clearTimeout(unpairedRelayProbeTimer);
+    unpairedRelayProbeTimer = null;
+  }
+
   // Keeps npm start output compact by emitting only high-signal connection states.
   function logConnectionStatus(status) {
     if (lastConnectionStatus === status) {
@@ -151,6 +171,7 @@ function startBridge() {
       shutdown(codex, () => socket, () => {
         isShuttingDown = true;
         clearReconnectTimer();
+        clearUnpairedRelayProbeTimer();
       });
       return;
     }
@@ -159,13 +180,56 @@ function startBridge() {
       return;
     }
 
-    reconnectAttempt += 1;
-    const delayMs = Math.min(1_000 * reconnectAttempt, 5_000);
+    if (relayRotator.hasFallbacks()) {
+      const previousRelay = relayRotator.currentBaseUrl();
+      const nextRelay = relayRotator.advance();
+      if (nextRelay !== previousRelay) {
+        console.log(`[remodex] relay fallback -> ${nextRelay}`);
+      }
+    }
+
+    const isProbeTimeout = closeCode === 4002;
+    reconnectAttempt = isProbeTimeout
+      ? reconnectAttempt
+      : reconnectAttempt + 1;
+    const delayMs = isProbeTimeout
+      ? 0
+      : Math.min(1_000 * reconnectAttempt, 5_000);
     logConnectionStatus("connecting");
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connectRelay();
     }, delayMs);
+  }
+
+  function armUnpairedRelayProbeTimer(expectedSocket) {
+    clearUnpairedRelayProbeTimer();
+    if (unpairedRelayProbeMs <= 0) {
+      return;
+    }
+    if (!relayRotator.hasFallbacks()) {
+      return;
+    }
+    if (secureTransport.isSecureChannelReady()) {
+      return;
+    }
+
+    unpairedRelayProbeTimer = setTimeout(() => {
+      unpairedRelayProbeTimer = null;
+      if (isShuttingDown || socket !== expectedSocket) {
+        return;
+      }
+      if (expectedSocket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      if (secureTransport.isSecureChannelReady()) {
+        return;
+      }
+
+      // If no iPhone secure handshake appears on this relay within the probe
+      // window, jump to the next candidate so cloud/local split can self-heal.
+      expectedSocket.close(4002, "relay_probe_timeout");
+    }, unpairedRelayProbeMs);
   }
 
   function connectRelay() {
@@ -174,6 +238,7 @@ function startBridge() {
     }
 
     logConnectionStatus("connecting");
+    const relaySessionUrl = relayRotator.currentSessionUrl();
     const nextSocket = new WebSocket(relaySessionUrl, {
       // The relay uses this per-session secret to authenticate the first push registration.
       headers: {
@@ -188,6 +253,7 @@ function startBridge() {
       reconnectAttempt = 0;
       logConnectionStatus("connected");
       secureTransport.bindLiveSendWireMessage(sendRelayWireMessage);
+      armUnpairedRelayProbeTimer(nextSocket);
     });
 
     nextSocket.on("message", (data) => {
@@ -202,11 +268,15 @@ function startBridge() {
           handleApplicationMessage(plaintextMessage);
         },
       })) {
+        if (secureTransport.isSecureChannelReady()) {
+          clearUnpairedRelayProbeTimer();
+        }
         return;
       }
     });
 
     nextSocket.on("close", (code) => {
+      clearUnpairedRelayProbeTimer();
       logConnectionStatus("disconnected");
       if (socket === nextSocket) {
         socket = null;
@@ -238,6 +308,7 @@ function startBridge() {
     logConnectionStatus("disconnected");
     isShuttingDown = true;
     clearReconnectTimer();
+    clearUnpairedRelayProbeTimer();
     stopContextUsageWatcher();
     rolloutLiveMirror?.stopAll();
     desktopRefresher.handleTransportReset();
@@ -249,10 +320,12 @@ function startBridge() {
   process.on("SIGINT", () => shutdown(codex, () => socket, () => {
     isShuttingDown = true;
     clearReconnectTimer();
+    clearUnpairedRelayProbeTimer();
   }));
   process.on("SIGTERM", () => shutdown(codex, () => socket, () => {
     isShuttingDown = true;
     clearReconnectTimer();
+    clearUnpairedRelayProbeTimer();
   }));
 
   // Routes decrypted app payloads through the same bridge handlers as before.
@@ -528,6 +601,11 @@ function extractTurnId(method, params) {
 
 function readString(value) {
   return typeof value === "string" && value ? value : null;
+}
+
+function parseIntegerEnv(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 module.exports = { startBridge };

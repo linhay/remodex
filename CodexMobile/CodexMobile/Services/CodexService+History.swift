@@ -340,7 +340,7 @@ extension CodexService {
             // so that the stable sort preserves server-provided chronology.
             var sorted = history.sorted(by: { $0.createdAt < $1.createdAt })
             for index in sorted.indices {
-                sorted[index].orderIndex = CodexMessageOrderCounter.next()
+                sorted[index].orderIndex = index
             }
             return sorted
         }

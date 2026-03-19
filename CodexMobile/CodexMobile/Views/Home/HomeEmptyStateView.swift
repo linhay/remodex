@@ -8,8 +8,9 @@ import SwiftUI
 
 struct HomeEmptyStateView<AuthSection: View>: View {
     let connectionPhase: CodexConnectionPhase
-    let statusMessage: String?
     let securityLabel: String?
+    var showsHeroSection = true
+    var showsPrimaryAction = true
     let onToggleConnection: () -> Void
     @ViewBuilder let authSection: () -> AuthSection
 
@@ -17,85 +18,99 @@ struct HomeEmptyStateView<AuthSection: View>: View {
     @State private var connectionAttemptStartedAt: Date?
 
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer()
+        Group {
+            if showsHeroSection {
+                VStack(spacing: 0) {
+                    Spacer()
 
-            VStack(spacing: 20) {
-                Image("AppLogo")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 88, height: 88)
-                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .adaptiveGlass(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    VStack(spacing: 20) {
+                        Image("AppLogo")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 88, height: 88)
+                            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                            .adaptiveGlass(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
 
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusDotColor)
-                        .frame(width: 6, height: 6)
-                        .scaleEffect(dotPulse ? 1.4 : 1.0)
-                        .opacity(dotPulse ? 0.6 : 1.0)
-                        .animation(
-                            isBusy
-                                ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
-                                : .default,
-                            value: dotPulse
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(statusDotColor)
+                                .frame(width: 6, height: 6)
+                                .scaleEffect(dotPulse ? 1.4 : 1.0)
+                                .opacity(dotPulse ? 0.6 : 1.0)
+                                .animation(
+                                    isBusy
+                                        ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+                                        : .default,
+                                    value: dotPulse
+                                )
+
+                            Text(statusLabel)
+                                .font(AppFont.caption(weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(
+                            Capsule()
+                                .fill(Color(.systemBackground))
+                        )
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
                         )
 
-                    Text(statusLabel)
-                        .font(AppFont.caption(weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .background(
-                    Capsule()
-                        .fill(Color(.systemBackground))
-                )
-                .overlay(
-                    Capsule()
-                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-                )
-
-                if let securityLabel, !securityLabel.isEmpty {
-                    Text(securityLabel)
-                        .font(AppFont.caption())
-                        .foregroundStyle(.secondary)
-                }
-
-                if let statusMessage, !statusMessage.isEmpty {
-                    Text(statusMessage)
-                        .font(AppFont.caption())
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-
-                // Keeps the remembered relay pairing actionable after app relaunch or stale reconnects.
-                Button(action: onToggleConnection) {
-                    HStack(spacing: 10) {
-                        if isBusy {
-                            ProgressView()
-                                .tint(.gray)
-                                .scaleEffect(0.9)
+                        if let securityLabel, !securityLabel.isEmpty {
+                            Text(securityLabel)
+                                .font(AppFont.caption())
+                                .foregroundStyle(.secondary)
                         }
 
-                        Text(primaryButtonTitle)
-                            .font(AppFont.body(weight: .semibold))
+                        if showsPrimaryAction {
+                            Button(action: onToggleConnection) {
+                                HStack(spacing: 10) {
+                                    if isBusy {
+                                        ProgressView()
+                                            .tint(.gray)
+                                            .scaleEffect(0.9)
+                                    }
+
+                                    Text(primaryButtonTitle)
+                                        .font(AppFont.body(weight: .semibold))
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 14)
+                                .foregroundStyle(primaryButtonForeground)
+                                .background(primaryButtonBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isBusy)
+                            .padding(.top, 6)
+                        }
+
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 14)
-                    .foregroundStyle(primaryButtonForeground)
-                    .background(primaryButtonBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .frame(maxWidth: 280)
+
+                    ScrollView(showsIndicators: false) {
+                        authSection()
+                            .frame(maxWidth: 560)
+                            .padding(.top, 16)
+                            .padding(.horizontal, 16)
+                    }
+                    .frame(maxHeight: 340)
+
+                    Spacer()
                 }
-                .buttonStyle(.plain)
-                .disabled(isBusy)
-                .padding(.top, 6)
-
-                authSection()
+            } else {
+                ScrollView(showsIndicators: false) {
+                    authSection()
+                        .frame(maxWidth: 560)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 16)
+                        .padding(.bottom, 24)
+                }
+                .safeAreaPadding(.top, 8)
             }
-            .frame(maxWidth: 280)
-
-            Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("Remodex")

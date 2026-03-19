@@ -11,8 +11,10 @@ import UIKit
 
 @MainActor
 final class CodexServiceConnectionErrorTests: XCTestCase {
+    private static var retainedServices: [CodexService] = []
+
     func testBenignBackgroundAbortIsSuppressedFromUserFacingErrors() {
-        let service = CodexService()
+        let service = makeService()
         let error = NWError.posix(.ECONNABORTED)
         service.isAppInForeground = false
 
@@ -21,7 +23,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
     }
 
     func testSendSideNoDataDisconnectIsTreatedAsBenign() {
-        let service = CodexService()
+        let service = makeService()
         let error = NWError.posix(.ENODATA)
         service.isAppInForeground = false
 
@@ -31,7 +33,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
     }
 
     func testConnectionResetIsTreatedAsBenignRelayDisconnect() {
-        let service = CodexService()
+        let service = makeService()
         let error = NWError.posix(.ECONNRESET)
         service.isAppInForeground = false
 
@@ -40,7 +42,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
     }
 
     func testInactiveAppStateStillSuppressesBenignDisconnectNoise() {
-        let service = CodexService()
+        let service = makeService()
         let error = NWError.posix(.ECONNRESET)
         service.isAppInForeground = true
         service.applicationStateProvider = { .inactive }
@@ -49,7 +51,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
     }
 
     func testTransientTimeoutStillSurfacesToUser() {
-        let service = CodexService()
+        let service = makeService()
         let error = NWError.posix(.ETIMEDOUT)
 
         XCTAssertTrue(service.isRecoverableTransientConnectionError(error))
@@ -57,7 +59,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
     }
 
     func testBenignDisconnectStaysSilentWhileAutoReconnectIsRunning() {
-        let service = CodexService()
+        let service = makeService()
         let error = CodexServiceError.disconnected
         service.isAppInForeground = true
         service.shouldAutoReconnectOnForeground = true
@@ -68,7 +70,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
     }
 
     func testConnectionRefusedStillSurfacesToUser() {
-        let service = CodexService()
+        let service = makeService()
         let error = NWError.posix(.ECONNREFUSED)
 
         XCTAssertFalse(service.shouldSuppressUserFacingConnectionError(error))
@@ -83,7 +85,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
     }
 
     func testBenignBackgroundAbortGetsFriendlyFailureCopy() {
-        let service = CodexService()
+        let service = makeService()
 
         XCTAssertEqual(
             service.userFacingConnectFailureMessage(NWError.posix(.ECONNABORTED)),
@@ -91,8 +93,22 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
+    func testPairingWaitingAbortLogIsSuppressed() {
+        let service = makeService()
+        let state = NWConnection.State.waiting(NWError.posix(.ECONNABORTED))
+
+        XCTAssertTrue(service.shouldSuppressPairingStateLog(state))
+    }
+
+    func testPairingWaitingTimeoutLogIsNotSuppressed() {
+        let service = makeService()
+        let state = NWConnection.State.waiting(NWError.posix(.ETIMEDOUT))
+
+        XCTAssertFalse(service.shouldSuppressPairingStateLog(state))
+    }
+
     func testPrepareForConnectionAttemptKeepsThreadStateWhenSocketAlreadyDropped() async {
-        let service = CodexService()
+        let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let turnID = "turn-\(UUID().uuidString)"
 
@@ -105,5 +121,14 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
         XCTAssertTrue(service.bufferedSecureControlMessages.isEmpty)
+    }
+
+    private func makeService() -> CodexService {
+        let suiteName = "CodexServiceConnectionErrorTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        let service = CodexService(defaults: defaults)
+        Self.retainedServices.append(service)
+        return service
     }
 }

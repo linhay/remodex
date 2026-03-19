@@ -109,7 +109,9 @@ enum TurnSessionDiffSummaryCalculator {
     // Treats push success messages as a reset marker so per-chat badges reflect only
     // the current unpushed portion of the conversation.
     private static func messagesAfterMostRecentPush(in messages: [CodexMessage]) -> ArraySlice<CodexMessage> {
-        guard let lastPushIndex = messages.lastIndex(where: TurnSessionDiffResetMarker.isResetMessage) else {
+        guard let lastPushIndex = messages.lastIndex(where: { message in
+            TurnSessionDiffResetMarker.isResetMessage(message)
+        }) else {
             return messages[...]
         }
         let nextIndex = messages.index(after: lastPushIndex)

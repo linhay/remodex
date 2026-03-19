@@ -11,9 +11,9 @@ import XCTest
 final class TurnComposerSendAvailabilityTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
-    func testSendDisabledWhenDisconnected() {
+    func testSendEnabledWhenDisconnectedButPayloadPresent() {
         let state = makeState(isConnected: false)
-        XCTAssertTrue(state.isSendDisabled)
+        XCTAssertFalse(state.isSendDisabled)
     }
 
     func testSendDisabledWhenSendingInFlight() {

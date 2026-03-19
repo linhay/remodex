@@ -8,8 +8,11 @@ import Foundation
 import Security
 
 enum CodexSecureKeys {
+    static let relayAccounts = "codex.relay.accounts"
     static let relaySessionId = "codex.relay.sessionId"
     static let relayUrl = "codex.relay.url"
+    static let relayCandidates = "codex.relay.candidates"
+    static let relayAuthKey = "codex.relay.authKey"
     static let relayMacDeviceId = "codex.relay.macDeviceId"
     static let relayMacIdentityPublicKey = "codex.relay.macIdentityPublicKey"
     static let relayProtocolVersion = "codex.relay.protocolVersion"

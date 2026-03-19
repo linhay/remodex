@@ -335,6 +335,19 @@ enum TurnTimelineReducer {
         guard !normalizedText.isEmpty else {
             return nil
         }
-        return "\(turnId)|\(normalizedText)"
+
+        let normalizedWithoutStatus = normalizedText
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .filter { line in
+                !line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                    .hasPrefix("status:")
+            }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let dedupeText = normalizedWithoutStatus.isEmpty ? normalizedText : normalizedWithoutStatus
+        return "\(turnId)|\(dedupeText)"
     }
 }

@@ -235,12 +235,18 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.turnTerminalState(for: turnID), .stopped)
     }
 
-    func testStoppedCompletionUpdatesThreadStoppedTurnCache() {
+    func testStoppedCompletionUpdatesThreadStoppedTurnCacheWhenTurnHasTimelineMessages() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let turnID = "turn-\(UUID().uuidString)"
 
         sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        service.appendSystemMessage(
+            threadId: threadID,
+            text: "turn started",
+            turnId: turnID,
+            kind: .thinking
+        )
         sendTurnCompletedStopped(service: service, threadID: threadID, turnID: turnID)
 
         XCTAssertEqual(service.stoppedTurnIDs(for: threadID), Set([turnID]))
@@ -637,6 +643,8 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             CodexPairingQRPayload(
                 v: codexPairingQRVersion,
                 relay: "wss://relay.test/relay",
+                relayCandidates: nil,
+                relayAuthKey: nil,
                 sessionId: "fresh-session-\(UUID().uuidString)",
                 macDeviceId: macDeviceID,
                 macIdentityPublicKey: "fresh-public-key-\(UUID().uuidString)",
@@ -649,6 +657,9 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
 
     func testSavedRelaySessionRequiresBothSessionIdAndRelayURL() {
         let service = makeService()
+        service.relaySessionId = nil
+        service.relayUrl = nil
+        service.relayCandidates = []
 
         XCTAssertFalse(service.hasSavedRelaySession)
 

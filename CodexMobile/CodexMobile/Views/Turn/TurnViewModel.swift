@@ -20,7 +20,6 @@ struct TurnComposerSendAvailability {
     // Evaluates whether sending is allowed for the current composer state.
     var isSendDisabled: Bool {
         isSending
-            || !isConnected
             || hasPendingReviewSelection
             || (trimmedInput.isEmpty && !hasReadyImages && !hasReviewSelection)
             || hasBlockingAttachmentState
@@ -736,7 +735,6 @@ final class TurnViewModel {
 
         guard (!payload.isEmpty || !attachments.isEmpty || reviewSelection != nil),
               !isSending,
-              codex.isConnected,
               !hasBlockingAttachmentState else {
             return
         }
@@ -772,6 +770,10 @@ final class TurnViewModel {
         Task { @MainActor in
             defer { isSending = false }
 
+            guard await ensureConnectedForSend(codex: codex) else {
+                return
+            }
+
             let stillBusy = await refreshBusyStateIfNeeded(codex: codex, threadID: threadID, wasBusy: threadBusy)
             if stillBusy {
                 await performBusyThreadSend(
@@ -794,6 +796,50 @@ final class TurnViewModel {
 
             await performTurnSend(pendingSend, codex: codex, threadID: threadID)
         }
+    }
+
+    private func ensureConnectedForSend(codex: CodexService) async -> Bool {
+        if codex.isConnected {
+            return true
+        }
+
+        if codex.isConnecting {
+            let deadline = Date().addingTimeInterval(6)
+            while Date() < deadline, codex.isConnecting {
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
+            if codex.isConnected {
+                return true
+            }
+        }
+
+        guard let sessionId = codex.normalizedRelaySessionId else {
+            codex.lastErrorMessage = "No saved relay pairing found. Scan a QR code to reconnect."
+            return false
+        }
+
+        let serverURLs = codex.normalizedRelayBaseURLsForReconnect.map { "\($0)/\(sessionId)" }
+        guard !serverURLs.isEmpty else {
+            codex.lastErrorMessage = "No saved relay URL found. Scan a QR code to reconnect."
+            return false
+        }
+
+        var lastError: Error?
+        for serverURL in serverURLs {
+            do {
+                try await codex.connect(serverURL: serverURL, token: "", role: "iphone")
+                return codex.isConnected
+            } catch {
+                lastError = error
+            }
+        }
+
+        if let lastError {
+            codex.lastErrorMessage = codex.userFacingConnectFailureMessage(lastError)
+        } else {
+            codex.lastErrorMessage = "Could not reconnect to the relay. Try again."
+        }
+        return false
     }
 
     func flushQueueIfPossible(codex: CodexService, threadID: String) {
@@ -884,8 +930,7 @@ final class TurnViewModel {
                     expectedTurnId: expectedTurnID,
                     attachments: draft.attachments,
                     skillMentions: draft.skillMentions,
-                    shouldAppendUserMessage: true,
-                    collaborationMode: draft.collaborationMode
+                    shouldAppendUserMessage: true
                 )
                 removeQueuedDraft(id: id, codex: codex, threadID: threadID)
             } catch {

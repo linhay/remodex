@@ -93,6 +93,20 @@ enum TurnComposerMetaMapper {
                 .joined(separator: " ")
         }
     }
+
+    // Ensures Picker selection always maps to a visible tag to avoid SwiftUI invalid-selection warnings.
+    static func sanitizedPickerSelection(
+        selectedValue: String?,
+        availableValues: [String],
+        fallbackValue: String
+    ) -> String {
+        guard let selectedValue,
+              !selectedValue.isEmpty,
+              availableValues.contains(selectedValue) else {
+            return fallbackValue
+        }
+        return selectedValue
+    }
 }
 
 struct TurnComposerReasoningDisplayOption: Identifiable {

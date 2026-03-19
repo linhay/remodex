@@ -7,7 +7,18 @@
 import Foundation
 
 struct AIChangeSetPersistence {
-    private let fileName = "codex-ai-change-sets-v1.json"
+    private let accountScope: String?
+    private var fileName: String {
+        if let accountScope, !accountScope.isEmpty {
+            return "codex-ai-change-sets-v1-\(accountScope).json"
+        }
+        return "codex-ai-change-sets-v1.json"
+    }
+
+    init(accountScope: String? = nil) {
+        let normalized = accountScope?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.accountScope = normalized.isEmpty ? nil : normalized
+    }
 
     // Loads the stored change-set ledger from disk. Returns an empty array on failure.
     func load() -> [AIChangeSet] {

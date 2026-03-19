@@ -6,6 +6,12 @@
 
 import SwiftUI
 
+func simDebugLog(_ message: @autoclosure () -> String) {
+#if targetEnvironment(simulator)
+    print("[sim-debug] \(message())")
+#endif
+}
+
 struct ContentView: View {
     @Environment(CodexService.self) private var codex
     @Environment(\.scenePhase) private var scenePhase
@@ -15,32 +21,74 @@ struct ContentView: View {
     @State private var isSidebarOpen = false
     @State private var sidebarDragOffset: CGFloat = 0
     @State private var selectedThread: CodexThread?
+    @State private var isAccountHomePresented = true
     @State private var navigationPath = NavigationPath()
     @State private var showSettings = false
     @State private var isShowingManualScanner = false
     @State private var isSearchActive = false
     @State private var isRetryingBridgeUpdate = false
-    @State private var isPreparingManualScanner = false
     @State private var threadCompletionBannerDismissTask: Task<Void, Never>?
+    @State private var openAccountTask: Task<Void, Never>?
+    @State private var openingAccountID: String?
+    @State private var latestOpenAccountRequestID = UUID()
     @AppStorage("codex.hasSeenOnboarding") private var hasSeenOnboarding = false
 
     private let sidebarWidth: CGFloat = 330
+    private let settingsAccentColor = Color(.plan)
     private static let sidebarSpring = Animation.spring(response: 0.35, dampingFraction: 0.85)
 
     var body: some View {
         rootContent
-            // Only resume saved-pairing recovery after onboarding is done and the manual scanner is not in control.
+            // Keep launch/foreground reconnect observers alive even while the QR scanner is visible.
             .task {
-                guard hasSeenOnboarding, !isShowingManualScanner else {
+                let isRunningXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+                if ProcessInfo.processInfo.arguments.contains("-CodexUITestsOpenSettings") {
+                    showSettings = true
+                }
+                seedRelayAccountsForUITestsIfNeeded()
+                applyUITestTimelineFixtureIfNeeded()
+                guard !isRunningXCTest else {
+                    hasSeenOnboarding = true
                     return
                 }
+                #if targetEnvironment(simulator)
+                hasSeenOnboarding = true
+                if !codex.isConnected,
+                   !codex.isConnecting,
+                   let simulatorProbe = simulatorPairingPayloadProbe(),
+                   case .success(let simulatorPayload, let source) = simulatorProbe {
+                    simDebugLog("found pairing payload from \(source.rawValue) for session \(simulatorPayload.sessionId)")
+                    await viewModel.connectToRelay(
+                        pairingPayload: simulatorPayload,
+                        codex: codex
+                    )
+                } else {
+                    logSimulatorPairingProbeFailureIfNeeded()
+                }
+                #endif
                 await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
             }
-            .onChange(of: showSettings) { _, show in
-                if show {
-                    navigationPath.append("settings")
-                    showSettings = false
+            .task(id: scenePhase) {
+                guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+                    return
                 }
+                guard scenePhase == .active else {
+                    return
+                }
+
+                while !Task.isCancelled, scenePhase == .active {
+                    await viewModel.autoSwitchRelayIfNeeded(codex: codex)
+                    try? await Task.sleep(nanoseconds: viewModel.relayAutoSwitchInterval())
+                }
+            }
+            .onChange(of: showSettings) { _, show in
+                if ContentSettingsNavigationGate.shouldAppendSettingsRoute(
+                    showSettings: show,
+                    navigationPathIsEmpty: navigationPath.isEmpty
+                ) {
+                    navigationPath.append("settings")
+                }
+                showSettings = false
             }
             .onChange(of: isSidebarOpen) { wasOpen, isOpen in
                 guard !wasOpen, isOpen else {
@@ -61,6 +109,11 @@ struct ContentView: View {
                     to: thread?.id
                 )
                 codex.activeThreadId = thread?.id
+                if ContentAccountHomeModalPolicy.shouldDismissAfterSelectingThread(
+                    selectedThreadID: thread?.id
+                ) {
+                    dismissAccountHome()
+                }
             }
             .onChange(of: codex.activeThreadId) { _, activeThreadId in
                 guard let activeThreadId,
@@ -75,17 +128,20 @@ struct ContentView: View {
             }
             .onChange(of: scenePhase) { _, phase in
                 codex.setForegroundState(phase != .background)
+                guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+                    return
+                }
                 if phase == .active {
-                    guard hasSeenOnboarding, !isShowingManualScanner else {
-                        return
-                    }
                     Task {
                         await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
                     }
                 }
             }
             .onChange(of: codex.shouldAutoReconnectOnForeground) { _, shouldReconnect in
-                guard shouldReconnect, scenePhase == .active, hasSeenOnboarding, !isShowingManualScanner else {
+                guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+                    return
+                }
+                guard shouldReconnect, scenePhase == .active else {
                     return
                 }
                 Task {
@@ -116,23 +172,6 @@ struct ContentView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
             }
-            .alert(
-                "Chat Deleted",
-                isPresented: missingNotificationThreadAlertIsPresented,
-                presenting: codex.missingNotificationThreadPrompt
-            ) { _ in
-                Button("Not Now", role: .cancel) {
-                    codex.missingNotificationThreadPrompt = nil
-                }
-                Button("Start New Chat") {
-                    codex.missingNotificationThreadPrompt = nil
-                    Task {
-                        await startNewThreadFromMissingNotificationAlert()
-                    }
-                }
-            } message: { _ in
-                Text("This chat is no longer available. Start a new chat instead?")
-            }
             .overlay(alignment: .top) {
                 if let banner = codex.threadCompletionBanner {
                     ThreadCompletionBannerView(
@@ -150,46 +189,71 @@ struct ContentView: View {
                 }
             }
             .animation(.spring(response: 0.35, dampingFraction: 0.88), value: codex.threadCompletionBanner?.id)
+            .alert("Rename Account", isPresented: isRenamingAccountBinding) {
+                TextField("Account name", text: $viewModel.pendingAccountDisplayName)
+                Button("Save") {
+                    viewModel.confirmRename(codex: codex)
+                }
+                Button("Cancel", role: .cancel) {
+                    viewModel.renamingAccountID = nil
+                }
+            } message: {
+                Text("Use a clear name for this pairing profile.")
+            }
+            .confirmationDialog("Delete Account", isPresented: isDeletingAccountBinding) {
+                Button("Continue", role: .destructive) {
+                    viewModel.continueDeleteConfirmation()
+                }
+                Button("Cancel", role: .cancel) {
+                    viewModel.cancelDeleteFlow()
+                }
+            } message: {
+                Text("This will start account deletion. You will be asked to confirm again.")
+            }
+            .alert("Delete Account Permanently?", isPresented: isDeleteFinalConfirmBinding) {
+                Button("Delete", role: .destructive) {
+                    viewModel.confirmDelete(codex: codex)
+                }
+                Button("Cancel", role: .cancel) {
+                    viewModel.cancelDeleteFlow()
+                }
+            } message: {
+                Text("This only removes the saved pairing profile and cannot be undone.")
+            }
     }
 
     @ViewBuilder
     private var rootContent: some View {
-        if !hasSeenOnboarding {
+        switch ContentRootDestination.resolve(
+            hasSeenOnboarding: hasSeenOnboarding,
+            isShowingManualScanner: isShowingManualScanner
+        ) {
+        case .onboarding:
             OnboardingView {
-                finishOnboardingAndShowScanner()
+                withAnimation { hasSeenOnboarding = true }
             }
-        } else if isShowingManualScanner && !codex.isConnected {
+        case .scanner:
             qrScannerBody
-        } else if codex.isConnected
-            || viewModel.isAttemptingAutoReconnect
-            || shouldShowReconnectShell
-            || isPreparingManualScanner {
-            mainAppBody
-        } else {
-            qrScannerBody
-        }
-    }
-
-    private func finishOnboardingAndShowScanner() {
-        codex.shouldAutoReconnectOnForeground = false
-        codex.connectionRecoveryState = .idle
-        codex.lastErrorMessage = nil
-        withAnimation {
-            hasSeenOnboarding = true
-            isShowingManualScanner = true
+        case .home:
+            homeNavigationBody
         }
     }
 
     private var qrScannerBody: some View {
-        QRScannerView { pairingPayload in
-            Task {
+        QRScannerView(
+            onScan: { pairingPayload in
+                Task {
+                    isShowingManualScanner = false
+                    await viewModel.connectToRelay(
+                        pairingPayload: pairingPayload,
+                        codex: codex
+                    )
+                }
+            },
+            onClose: {
                 isShowingManualScanner = false
-                await viewModel.connectToRelay(
-                    pairingPayload: pairingPayload,
-                    codex: codex
-                )
             }
-        }
+        )
     }
 
     private var effectiveSidebarWidth: CGFloat {
@@ -203,6 +267,9 @@ struct ContentView: View {
                     selectedThread: $selectedThread,
                     showSettings: $showSettings,
                     isSearchActive: $isSearchActive,
+                    onNavigateToAccountsHome: {
+                        presentAccountHome()
+                    },
                     onClose: { closeSidebar() }
                 )
                 .frame(width: effectiveSidebarWidth)
@@ -224,11 +291,21 @@ struct ContentView: View {
         .gesture(edgeDragGesture)
     }
 
+    private var homeNavigationBody: some View {
+        mainAppBody
+            .fullScreenCover(isPresented: $isAccountHomePresented) {
+                NavigationStack {
+                    accountHomeBody
+                }
+                .interactiveDismissDisabled(true)
+            }
+    }
+
     // MARK: - Layers
 
     private var mainNavigationLayer: some View {
         NavigationStack(path: $navigationPath) {
-            mainContent
+            chatContent
                 .adaptiveNavigationBar()
                 .navigationDestination(for: String.self) { destination in
                     if destination == "settings" {
@@ -240,42 +317,101 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    @ViewBuilder
-    private var mainContent: some View {
-        if let thread = selectedThread {
-            TurnView(thread: thread)
-                .id(thread.id)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        hamburgerButton
+    private var chatContent: some View {
+        Group {
+            if let thread = selectedThread {
+                TurnView(thread: thread)
+                    .id(thread.id)
+                    .accessibilityIdentifier("turn.view.root")
+            } else {
+                ZStack {
+                    Color(.systemBackground)
+                        .ignoresSafeArea()
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .tint(.secondary)
+                        Text("Select a chat from the sidebar")
+                            .font(AppFont.subheadline())
+                            .foregroundStyle(.secondary)
                     }
-                }
-        } else {
-            HomeEmptyStateView(
-                connectionPhase: homeConnectionPhase,
-                statusMessage: codex.lastErrorMessage,
-                securityLabel: codex.secureConnectionState.statusLabel,
-                onToggleConnection: {
-                    Task {
-                        await viewModel.toggleConnection(codex: codex)
-                    }
-                }
-            ) {
-                if homeConnectionPhase == .connecting || (codex.hasSavedRelaySession && !codex.isConnected) {
-                    Button("Scan New QR Code") {
-                        presentManualScannerAfterStoppingReconnect()
-                    }
-                    .font(AppFont.subheadline(weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .buttonStyle(.plain)
-                    .disabled(isPreparingManualScanner)
                 }
             }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    hamburgerButton
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                hamburgerButton
+            }
+        }
+    }
+
+    private var accountHomeBody: some View {
+        AccountPageView(
+            connectionPhase: homeConnectionPhase,
+            securityLabel: codex.secureConnectionState.statusLabel,
+            hasAccounts: !codex.sortedRelayAccounts.isEmpty,
+            hasSavedRelaySession: codex.hasSavedRelaySession,
+            accounts: codex.sortedRelayAccounts,
+            activeRelayAccountID: codex.activeRelayAccountID,
+            isConnected: codex.isConnected,
+            accountMessage: codex.relayAccountManagementMessage,
+            openingAccountID: openingAccountID,
+            accentColor: settingsAccentColor,
+            lastConnectedText: { account in
+                viewModel.relayAccountLastConnectedText(account)
+            },
+            onToggleConnection: {
+                Task {
+                    await viewModel.toggleConnection(codex: codex)
+                }
+            },
+            onAddAccount: {
+                HapticFeedback.shared.triggerImpactFeedback()
+                viewModel.isShowingAddAccountScanner = true
+            },
+            onScanNewQRCode: {
+                Task {
+                    await viewModel.stopAutoReconnectForManualScan(codex: codex)
+                }
+                isShowingManualScanner = true
+            },
+            onOpenAccount: { accountId in
+                startOpeningAccount(accountId)
+            },
+            onRenameAccount: { account in
+                viewModel.requestRename(for: account)
+            },
+            onDeleteAccount: { account in
+                viewModel.requestDelete(for: account)
+            }
+        )
+        .adaptiveNavigationBar()
+        .toolbar {
+            if !codex.sortedRelayAccounts.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    addAccountToolbarButton
                 }
             }
+        }
+        .sheet(isPresented: $viewModel.isShowingAddAccountScanner) {
+            NavigationStack {
+                QRScannerView(
+                    onScan: { pairingPayload in
+                        Task {
+                            viewModel.isShowingAddAccountScanner = false
+                            await viewModel.connectToRelay(
+                                pairingPayload: pairingPayload,
+                                codex: codex
+                            )
+                        }
+                    },
+                    onClose: {
+                        viewModel.isShowingAddAccountScanner = false
+                    }
+                )
+            }
+        }
+        .onDisappear {
+            cancelOpeningAccountIfNeeded()
         }
     }
 
@@ -292,6 +428,23 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Menu")
+        .accessibilityIdentifier("chat.menu.button")
+    }
+
+    private var addAccountToolbarButton: some View {
+        Button {
+            HapticFeedback.shared.triggerImpactFeedback()
+            viewModel.isShowingAddAccountScanner = true
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
+                .padding(8)
+                .contentShape(Circle())
+                .adaptiveToolbarItem(in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Add Account")
     }
 
     // MARK: - Sidebar Geometry
@@ -367,17 +520,6 @@ struct ContentView: View {
         }
     }
 
-    // Shows the remembered pairing shell while a saved pairing can still be retried.
-    private var shouldShowReconnectShell: Bool {
-        codex.hasSavedRelaySession
-            && !isShowingManualScanner
-            && (codex.isConnecting
-                || viewModel.isAttemptingAutoReconnect
-                || codex.shouldAutoReconnectOnForeground
-                || isRetryingSavedPairing
-                || hasIdleSavedPairingRecovery)
-    }
-
     // Keeps home status honest during reconnect loops while letting post-connect sync show separately.
     private var homeConnectionPhase: CodexConnectionPhase {
         if viewModel.isAttemptingAutoReconnect && !codex.isConnected {
@@ -386,25 +528,25 @@ struct ContentView: View {
         return codex.connectionPhase
     }
 
-    private var isRetryingSavedPairing: Bool {
-        if case .retrying = codex.connectionRecoveryState {
-            return true
-        }
-        return false
+    private var isRenamingAccountBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.renamingAccountID != nil },
+            set: { if !$0 { viewModel.renamingAccountID = nil } }
+        )
     }
 
-    // Keeps the reconnect CTA visible after retries stop, unless the pairing must be replaced.
-    private var hasIdleSavedPairingRecovery: Bool {
-        guard codex.hasSavedRelaySession,
-              !codex.isConnected,
-              codex.secureConnectionState != .rePairRequired else {
-            return false
-        }
+    private var isDeletingAccountBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.deletingAccountID != nil },
+            set: { if !$0 { viewModel.cancelDeleteFlow() } }
+        )
+    }
 
-        return !codex.isConnecting
-            && !viewModel.isAttemptingAutoReconnect
-            && !codex.shouldAutoReconnectOnForeground
-            && !isRetryingSavedPairing
+    private var isDeleteFinalConfirmBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.pendingDeleteConfirmationAccountID != nil },
+            set: { if !$0 { viewModel.cancelDeleteFlow() } }
+        )
     }
 
     private func finishGesture(open: Bool) {
@@ -419,17 +561,6 @@ struct ContentView: View {
         Binding(
             get: { codex.bridgeUpdatePrompt },
             set: { codex.bridgeUpdatePrompt = $0 }
-        )
-    }
-
-    private var missingNotificationThreadAlertIsPresented: Binding<Bool> {
-        Binding(
-            get: { codex.missingNotificationThreadPrompt != nil },
-            set: { isPresented in
-                if !isPresented {
-                    codex.missingNotificationThreadPrompt = nil
-                }
-            }
         )
     }
 
@@ -449,32 +580,46 @@ struct ContentView: View {
         }
     }
 
+    private func simulatorPairingPayloadProbe() -> SimulatorPairingPayloadProbeResult? {
+        #if targetEnvironment(simulator)
+        let environment = ProcessInfo.processInfo.environment
+        let pasteboardString: String? = shouldProbeSimulatorPairingPasteboard(environment: environment)
+            ? UIPasteboard.general.string
+            : nil
+        return probeSimulatorPairingPayload(
+            environment: environment,
+            pasteboardString: pasteboardString
+        )
+        #else
+        return nil
+        #endif
+    }
+
+    private func logSimulatorPairingProbeFailureIfNeeded() {
+        #if targetEnvironment(simulator)
+        switch simulatorPairingPayloadProbe() {
+        case .none, .missing:
+            simDebugLog("no valid simulator pairing payload on launch")
+        case .failure(let failure):
+            simDebugLog(
+                "simulator pairing payload invalid from \(failure.source.rawValue): \(failure.message); raw=\(failure.rawPreview)"
+            )
+        case .success:
+            break
+        }
+        #endif
+    }
+
     // Switches the user back to the QR path when the old relay session is no longer useful.
     private func presentManualScannerForBridgeRecovery() {
         codex.bridgeUpdatePrompt = nil
         isRetryingBridgeUpdate = false
-        presentManualScannerAfterStoppingReconnect()
-    }
-
-    // Shows the QR scanner immediately and tears down any stale reconnect in the background.
-    private func presentManualScannerAfterStoppingReconnect() {
-        guard !isShowingManualScanner else {
-            return
-        }
-
-        isShowingManualScanner = true
 
         Task {
             await viewModel.stopAutoReconnectForManualScan(codex: codex)
-        }
-    }
-
-    private func startNewThreadFromMissingNotificationAlert() async {
-        do {
-            let thread = try await codex.startThread()
-            selectedThread = thread
-        } catch {
-            codex.lastErrorMessage = codex.userFacingTurnErrorMessage(from: error)
+            await MainActor.run {
+                isShowingManualScanner = true
+            }
         }
     }
 
@@ -510,6 +655,7 @@ struct ContentView: View {
         if isSidebarOpen {
             closeSidebar()
         }
+        dismissAccountHome()
         selectedThread = thread
         codex.activeThreadId = thread.id
         codex.markThreadAsViewed(thread.id)
@@ -520,29 +666,339 @@ struct ContentView: View {
         codex.threadCompletionBanner = nil
     }
 
-    // Keeps selected thread coherent with server list updates.
-    private func syncSelectedThread(with threads: [CodexThread]) {
-        if let selected = selectedThread,
-           !threads.contains(where: { $0.id == selected.id }) {
-            if codex.activeThreadId == selected.id {
+    private func openThread(_ thread: CodexThread) {
+        cancelOpeningAccountIfNeeded()
+        dismissAccountHome()
+        selectedThread = thread
+        codex.activeThreadId = thread.id
+        codex.markThreadAsViewed(thread.id)
+    }
+
+    private func startOpeningAccount(_ accountId: String) {
+        cancelOpeningAccountIfNeeded()
+
+        let requestID = UUID()
+        latestOpenAccountRequestID = requestID
+        openingAccountID = accountId
+        dismissAccountHome()
+
+        openAccountTask = Task {
+            let thread = await viewModel.openRelayAccount(accountId, codex: codex)
+            guard !Task.isCancelled else {
                 return
             }
-            selectedThread = codex.pendingNotificationOpenThreadID == nil ? threads.first : nil
+
+            await MainActor.run {
+                guard latestOpenAccountRequestID == requestID else {
+                    return
+                }
+                openAccountTask = nil
+                openingAccountID = nil
+                if let thread {
+                    openThread(thread)
+                } else {
+                    presentAccountHome()
+                }
+            }
+        }
+    }
+
+    private func cancelOpeningAccountIfNeeded() {
+        openAccountTask?.cancel()
+        openAccountTask = nil
+        openingAccountID = nil
+    }
+
+    private func dismissAccountHome() {
+        if isAccountHomePresented {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                isAccountHomePresented = false
+            }
+        }
+    }
+
+    private func presentAccountHome() {
+        if !isAccountHomePresented {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                isAccountHomePresented = true
+            }
+        }
+    }
+
+    // Keeps selected thread coherent with server list updates.
+    private func syncSelectedThread(with threads: [CodexThread]) {
+        let resolvedSelectionID = ContentThreadSelectionPolicy.selectedThreadID(
+            currentSelectedThreadID: selectedThread?.id,
+            activeThreadID: codex.activeThreadId,
+            pendingNotificationOpenThreadID: codex.pendingNotificationOpenThreadID,
+            availableThreadIDs: threads.map(\.id)
+        )
+
+        if ContentSidebarPresentationPolicy.shouldOpenSidebar(
+            resolvedSelectionID: resolvedSelectionID,
+            availableThreadCount: threads.count
+        ), !isSidebarOpen {
+            withAnimation(Self.sidebarSpring) {
+                isSidebarOpen = true
+            }
+        }
+
+        if selectedThread?.id != resolvedSelectionID {
+            selectedThread = threads.first(where: { $0.id == resolvedSelectionID })
             return
         }
 
         if let selected = selectedThread,
            let refreshed = threads.first(where: { $0.id == selected.id }) {
             selectedThread = refreshed
+        }
+    }
+
+    private func seedRelayAccountsForUITestsIfNeeded() {
+        guard ProcessInfo.processInfo.arguments.contains("-CodexUITestsSeedRelayAccounts"),
+              codex.relayAccountProfiles.isEmpty else {
             return
         }
 
-        if selectedThread == nil,
-           codex.activeThreadId == nil,
-           codex.pendingNotificationOpenThreadID == nil,
-           let first = threads.first {
-            selectedThread = first
+        let relayAuthKey = "uitest-auth-key"
+        let macIdentityPublicKey = Data(repeating: 7, count: 32).base64EncodedString()
+
+        let accountA = CodexPairingQRPayload(
+            v: codexPairingQRVersion,
+            relay: "ws://127.0.0.1:8788/relay",
+            relayCandidates: [
+                "ws://127.0.0.1:8788/relay",
+                "ws://localhost:8788/relay",
+            ],
+            relayAuthKey: relayAuthKey,
+            sessionId: "uitest-session-public",
+            macDeviceId: "uitest-mac-public",
+            macIdentityPublicKey: macIdentityPublicKey,
+            expiresAt: Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)
+        )
+        codex.rememberRelayPairing(accountA)
+
+        let accountB = CodexPairingQRPayload(
+            v: codexPairingQRVersion,
+            relay: "ws://localhost:8788/relay",
+            relayCandidates: [
+                "ws://localhost:8788/relay",
+                "ws://127.0.0.1:8788/relay",
+            ],
+            relayAuthKey: relayAuthKey,
+            sessionId: "uitest-session-lan",
+            macDeviceId: "uitest-mac-lan",
+            macIdentityPublicKey: macIdentityPublicKey,
+            expiresAt: Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)
+        )
+        codex.rememberRelayPairing(accountB)
+    }
+
+    // Seeds a deterministic local timeline so UI performance tests don't depend on relay connectivity.
+    private func applyUITestTimelineFixtureIfNeeded() {
+        let args = ProcessInfo.processInfo.arguments
+        guard args.contains("-CodexUITestsFixture") else {
+            return
         }
+
+        let messageCount = max(1, uiTestIntArgumentValue(flag: "-CodexUITestsMessageCount", fallback: 200))
+        let threadId = "uitest-thread"
+        let fixtureThread = CodexThread(
+            id: threadId,
+            title: "UI Test Conversation",
+            updatedAt: Date(),
+            syncState: .live
+        )
+        codex.upsertThread(fixtureThread)
+
+        let existingCount = codex.messagesByThread[threadId]?.count ?? 0
+        if existingCount != messageCount {
+            let seedDate = Date()
+            var fixtureMessages: [CodexMessage] = []
+            fixtureMessages.reserveCapacity(messageCount)
+
+            for index in 0 ..< messageCount {
+                let role: CodexMessageRole = index.isMultiple(of: 2) ? .user : .assistant
+                fixtureMessages.append(
+                    CodexMessage(
+                        threadId: threadId,
+                        role: role,
+                        text: "Fixture message \(index + 1)",
+                        createdAt: seedDate.addingTimeInterval(Double(index))
+                    )
+                )
+            }
+
+            codex.messagesByThread[threadId] = fixtureMessages
+        }
+
+        selectedThread = fixtureThread
+        codex.activeThreadId = threadId
+        isAccountHomePresented = false
+        hasSeenOnboarding = true
+    }
+
+    private func uiTestIntArgumentValue(flag: String, fallback: Int) -> Int {
+        let args = ProcessInfo.processInfo.arguments
+        guard let flagIndex = args.firstIndex(of: flag),
+              flagIndex + 1 < args.count,
+              let parsed = Int(args[flagIndex + 1]) else {
+            return fallback
+        }
+
+        return parsed
+    }
+}
+
+enum ContentSettingsNavigationGate {
+    static func shouldAppendSettingsRoute(
+        showSettings: Bool,
+        navigationPathIsEmpty: Bool
+    ) -> Bool {
+        showSettings && navigationPathIsEmpty
+    }
+}
+
+enum SimulatorPairingPayloadSource: String, Equatable {
+    case environment
+    case pasteboard
+}
+
+struct SimulatorPairingPayloadFailure: Equatable {
+    let source: SimulatorPairingPayloadSource
+    let message: String
+    let rawPreview: String
+}
+
+enum SimulatorPairingPayloadProbeResult {
+    case missing
+    case success(CodexPairingQRPayload, SimulatorPairingPayloadSource)
+    case failure(SimulatorPairingPayloadFailure)
+}
+
+func probeSimulatorPairingPayload(
+    environment: [String: String],
+    pasteboardString: String?
+) -> SimulatorPairingPayloadProbeResult {
+    if let rawValue = environment["REMODEX_SIM_PAIRING_PAYLOAD"] {
+        return parseSimulatorPairingPayload(rawValue, source: .environment)
+    }
+
+    guard shouldProbeSimulatorPairingPasteboard(environment: environment) else {
+        return .missing
+    }
+
+    if let pasteboardString, !pasteboardString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return parseSimulatorPairingPayload(pasteboardString, source: .pasteboard)
+    }
+
+    return .missing
+}
+
+private func shouldProbeSimulatorPairingPasteboard(environment: [String: String]) -> Bool {
+    guard let raw = environment["REMODEX_SIM_PAIRING_ALLOW_PASTEBOARD"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased() else {
+        return false
+    }
+
+    return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+}
+
+private func parseSimulatorPairingPayload(
+    _ rawValue: String,
+    source: SimulatorPairingPayloadSource
+) -> SimulatorPairingPayloadProbeResult {
+    do {
+        return .success(try CodexPairingQRPayload.parse(from: rawValue), source)
+    } catch {
+        return .failure(
+            SimulatorPairingPayloadFailure(
+                source: source,
+                message: error.localizedDescription,
+                rawPreview: simulatorPairingRawPreview(rawValue)
+            )
+        )
+    }
+}
+
+private func simulatorPairingRawPreview(_ rawValue: String) -> String {
+    let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.count <= 120 {
+        return trimmed
+    }
+
+    return "\(trimmed.prefix(120))..."
+}
+
+enum ContentAccountHomePresentationPolicy {
+    static func showsHeroSection(hasAccounts: Bool) -> Bool {
+        !hasAccounts
+    }
+}
+
+enum ContentAccountHomeModalPolicy {
+    static func shouldDismissAfterSelectingThread(selectedThreadID: String?) -> Bool {
+        selectedThreadID != nil
+    }
+}
+
+enum ContentRelayAccountHomePolicy {
+    static func preferredThreadToOpen(from threads: [CodexThread]) -> CodexThread? {
+        threads.first(where: { $0.syncState == .live }) ?? threads.first
+    }
+}
+
+enum ContentRootDestination: Equatable {
+    case onboarding
+    case scanner
+    case home
+
+    static func resolve(
+        hasSeenOnboarding: Bool,
+        isShowingManualScanner: Bool
+    ) -> Self {
+        guard hasSeenOnboarding else {
+            return .onboarding
+        }
+
+        return isShowingManualScanner ? .scanner : .home
+    }
+}
+
+enum ContentThreadSelectionPolicy {
+    static func selectedThreadID(
+        currentSelectedThreadID: String?,
+        activeThreadID: String?,
+        pendingNotificationOpenThreadID: String?,
+        availableThreadIDs: [String]
+    ) -> String? {
+        guard let currentSelectedThreadID else {
+            return nil
+        }
+
+        if availableThreadIDs.contains(currentSelectedThreadID) {
+            return currentSelectedThreadID
+        }
+
+        if activeThreadID == currentSelectedThreadID {
+            return currentSelectedThreadID
+        }
+
+        if pendingNotificationOpenThreadID != nil {
+            return nil
+        }
+
+        return nil
+    }
+}
+
+enum ContentSidebarPresentationPolicy {
+    static func shouldOpenSidebar(
+        resolvedSelectionID: String?,
+        availableThreadCount: Int
+    ) -> Bool {
+        resolvedSelectionID == nil && availableThreadCount > 0
     }
 }
 

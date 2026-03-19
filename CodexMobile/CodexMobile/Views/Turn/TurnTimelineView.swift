@@ -5,6 +5,9 @@
 // Depends on: SwiftUI, TurnTimelineReducer, TurnScrollStateTracker, MessageRow
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 private enum TurnAutoScrollMode {
     case followBottom
@@ -303,12 +306,29 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func footer(scrollToBottomAction: (() -> Void)? = nil) -> some View {
         VStack(spacing: 0) {
-            if let errorMessage, !errorMessage.isEmpty {
-                Text(errorMessage)
-                    .font(AppFont.caption())
+            if let errorMessage, TurnErrorBannerCopyPolicy.shouldShowBanner(errorMessage) {
+                HStack(alignment: .top, spacing: 8) {
+                    Text(errorMessage)
+                        .font(AppFont.caption())
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                        .contextMenu {
+                            Button("Copy") {
+                                copyErrorBannerText(errorMessage)
+                            }
+                        }
+                        .accessibilityIdentifier("turn.error.banner")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Button("Copy") {
+                        copyErrorBannerText(errorMessage)
+                    }
+                    .font(AppFont.caption(weight: .semibold))
                     .foregroundStyle(.red)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 4)
+                    .accessibilityIdentifier("turn.error.banner.copy")
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
             }
 
             composer()
@@ -335,6 +355,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: shouldShowScrollToLatestButton)
+    }
+
+    private func copyErrorBannerText(_ text: String) {
+        #if canImport(UIKit)
+        UIPasteboard.general.string = text
+        #endif
     }
 
     private var shouldShowScrollToLatestButton: Bool {
@@ -612,6 +638,13 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         } else {
             proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
         }
+    }
+}
+
+enum TurnErrorBannerCopyPolicy {
+    static func shouldShowBanner(_ message: String?) -> Bool {
+        guard let message else { return false }
+        return !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
